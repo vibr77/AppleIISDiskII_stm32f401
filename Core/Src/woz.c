@@ -15,15 +15,18 @@ __uint16_t BLK_startingBlocOffset[160];
 
 unsigned int fatClusterWOZ[20];
 
+extern unsigned char mountedImageFile;
+
 int mountWozFile(char * filename){
     
     FRESULT fres; 
     FIL fil;  
 
-    fres = f_open(&fil,filename , FA_READ);     // Step 2 Open the file long naming
+    fres = f_open(&fil,filename , FA_READ);    
 
     if(fres != FR_OK){
         printf("File open Error: (%i)\r\n", fres);
+        mountedImageFile=0;
         return -1;
     } 
 
@@ -61,7 +64,7 @@ int mountWozFile(char * filename){
     }
 
     free(tmp);
-
+    mountedImageFile=1;
 
 
     

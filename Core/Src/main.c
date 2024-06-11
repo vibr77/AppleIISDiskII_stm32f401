@@ -1,20 +1,27 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2024 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/*
+__   _____ ___ ___        Author: Vincent BESSON
+ \ \ / /_ _| _ ) _ \      Release: 0.1
+  \ V / | || _ \   /      Date: 2024
+   \_/ |___|___/_|_\      Description: Apple Disk II Emulator on STM32F4x
+                2024      Licence: Creative Commons
+______________________
+
+Note 
++ CubeMX is needed to generate the code not included such as drivers folders and ...
++ An update of fatfs is required to manage long filename otherwise it crashes, v0.15 
++ any stm32fx would work, only available ram size is important >= 32 kbytes to manage 3 full track in // and also write buffer
+
+Lessons learne:
+- SDCard CMD17 is not fast enough due to wait before accessing to the bloc (140 CPU Cycle at 64 MHz), prefer CMD18 with multiple blocs read,
+- Circular buffer with partial track is possible but needs complex coding to manage buffer copy and correct SDcard timing (I do not recommand),
+- bitstream output is made via DMA SPI (best accurate option), do not use baremetal bitbanging with assemnbly (my first attempt) it is not accurate in ARM with internal interrupt,
+
+Current status: NOT WORKING
++ woz file support in progress
+
+*/ 
+
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -81,40 +88,41 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
+
 volatile int ph_track=0;                                    // SDISK Physical track 0 - 139
 volatile int prevPh_track=0;
                                       
 unsigned char prevTrk=0;                                    // prevTrk to keep track of the last head track
-volatile unsigned char prepareNewSector=0;                  // Flag to trigger new read of the SDCard based on Trk move or Sector changes within a track 
-volatile unsigned char stopFlg=0;
-unsigned char mountedNic=0;
+volatile unsigned char trkChangeFlg=0;                      // Head move & trk change according to TMAP Woz
+unsigned char mountedImageFile=0;                           // Image file mount status flag
 
-const unsigned int DMABlockSize=6656;                        // Size of the DMA Buffer
+const unsigned int DMABlockSize=6656;                       // Size of the DMA Buffer => full track width with 13 block of 512
 unsigned char DMA_BIT_BUFFER[6656];                         // DMA Buffer from the SPI
-unsigned int woz_block_sel_012=0;                           // current woz_track_data_bloc[x] selector
-//unsigned int woz_block_sel_ab=0;                          // index on the buffer 0 -> first part 1 second part
+unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
                               
-//                                                                        // trk 0-35
-long database=0;                                                                  // start of the data segment in FAT
-int csize=0;                                                                      // Cluster size
+                                                            // trk 0-35
+long database=0;                                            // start of the data segment in FAT
+int csize=0;                                                // Cluster size
 
 int rSector[3];
 
 const unsigned int blockNumber=13;                           // Number of block over 13 data block
-unsigned char woz_track_data_bloc[3][6656];                 // Char Array containing 3 tracks of 13 blocks 512 Bytes each
+unsigned char woz_track_data_bloc[3][6656];                  // Char Array containing 3 tracks of 13 blocks 512 Bytes each
 
 unsigned int currentBlock=0;
 unsigned int nextBlock=0;           
 
 extern unsigned int fatClusterWOZ[20];
 extern __uint16_t BLK_startingBlocOffset[160];
+extern __uint8_t TMAP[160];
 
 char currentFullPath[1024];                                     // Path from root
                                                                 // Path
 int lastlistPos;
 list_t * dirChainedList;
 int updateFSFlag;
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -211,16 +219,6 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
   //  prepareNewSector=1;
   return;
 }
-
-/*
- Sec FAT  DATA SIGNATURE
- 01 16193 FF FE AA AA AA AB FF FF
- 02 16194 FF FE AA AA AB AA FE FE
- 03 16195 FF FE AA AA AB AB FE FF
- 04 16196 FF FE AA AA AA AE FF FA
- 05 16197 FF FE AA AA AA AF FF FB
-*/
-
 
 void walkDir(char * path){
   DIR dir;
@@ -463,8 +461,12 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
 
   unsigned char stp=0;
   int  move=0;
+  
+  if (isDiskIIDisable())
+    return;
 
-  stp = (GPIOB->IDR >> 8 & 0b0000000000001111);
+  //stp = (GPIOB->IDR >> 8 & 0b0000000000001111);
+  stp=(GPIOB->IDR&0b0000000000001111);
   int newPosition=magnet2Position[stp];
   int lastPosition=ph_track&7;
 
@@ -475,31 +477,14 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
   if (ph_track<0)
     ph_track=0;
 
-  if (ph_track>139)
-    ph_track=139;
+  if (ph_track>139)                                                                 // <!> to be changed according to Woz info
+    ph_track=139;                                             
 
-  int trk=ph_track>>2;                                                             // <!> todo need to mamange TMAP array
-
-  if(trk!=prevTrk){
-    stopFlg=1;
-    HAL_SPI_DMAPause(&hspi1);
-    if (trk>prevTrk)
-      woz_block_sel_012=(woz_block_sel_012+1)%3;
-    else 
-      woz_block_sel_012=(woz_block_sel_012-1)%3;
-
-    if (woz_sel_trk[woz_block_sel_012]!=trk){
-      rSector[1]=getSDAddrWoz(trk,0,csize, database);                  // get the compute the memory addr for the SDCard
-      cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[woz_block_sel_012],blockNumber);
-      woz_sel_trk[woz_block_sel_012]=(trk);                                                   // change the trk in the selector
-    }else{
-      memcpy(DMA_BIT_BUFFER,woz_track_data_bloc[woz_block_sel_012],DMABlockSize); 
-    }
-
-    HAL_SPI_DMAResume(&hspi1);
-
-    prevTrk=trk;   
-    stopFlg=1;
+  //int trk=ph_track>>2;                                                            
+  int trk=TMAP[ph_track];
+  if(trk!=0xFF && trk!=prevTrk){
+    trkChangeFlg=1;
+   
   }
 
 
@@ -588,7 +573,7 @@ int main(void)
   currentClistPos=0;                                                                // Current index in the chained List
   lastlistPos=0;                                                                    // Last index in the chained list
 
-  int trk=0;                                                                  // FAT Address to gather sector data
+  int trk=0;                                                                        
   unsigned long t1,t2,diff;
   currentFullPath[0]=0x0;                                                            // Root is ""
   
@@ -600,14 +585,11 @@ int main(void)
   initFSScreen(currentFullPath);
   displayFSItem();
 
-                                                         // Very important 
   csize=fs.csize;
   database=fs.database;
  
   mountWozFile("BII.woz");
 
-  
-  int block=-1;
   unsigned char sectorBuf0[2048];
  /* 
   for (int i=0;i<13;i++){
@@ -632,10 +614,12 @@ int main(void)
   fflush(stdout);
 
   int jj=0;
-
+  /*
   for (int i=0;i<DMABlockSize;i++){
     DMA_BIT_BUFFER[i]=0x0;
   }
+  */
+  memset(DMA_BIT_BUFFER,0,sizeof(char)*DMABlockSize);
 
   for (int i=0;i<3;i++){
     woz_sel_trk[i]=-1;
@@ -650,9 +634,14 @@ int main(void)
   for (int i=0;i<45;i++)                                                            // Used for Logic Analyzer and sync between SPI and Timer PWM
   __NOP();                                                                          // Macro to NOP assembly code
 
+  /**
+   * Init the buffer
+  */
 
   cmd18GetDataBlocks(rSector[1],woz_track_data_bloc[woz_block_sel_012],blockNumber);
-  woz_sel_trk[woz_block_sel_012]=(trk);                                                   // change the trk in the selector 
+  woz_sel_trk[woz_block_sel_012]=(trk);                                             // change the trk in the selector
+  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc[woz_block_sel_012],DMABlockSize);      // copy the new track data to the DMA Buffer
+      
   HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_BUFFER,DMABlockSize);   
 
   while (1){
@@ -669,54 +658,54 @@ int main(void)
     }
   */
   
-    if (stopFlg==1){                                                                  // Track has changed
-      stopFlg=0;                                                                      // Important to change the flag at the top
-      trk=ph_track>>2;                                                                // current track <!> todo manage from TMAP
+    if (!isDiskIIDisable() && trkChangeFlg==1 && mountedImageFile==1){                                                                  // Track has changed
+      trkChangeFlg=0;                                                                 // Important to change the flag at the top
+      trk=TMAP[ph_track];                                                               
+      //trk=ph_track>>2;                                                             // current track <!> todo manage from TMAP
+      DWT->CYCCNT = 0;                                                               // Reset cpu cycle counter
+      t1 = DWT->CYCCNT;
+      
+      HAL_SPI_DMAPause(&hspi1);                                                       // Pause the current DMA
+      if (trk>prevTrk)                                                                // Rotate to the active array selector
+        woz_block_sel_012=(woz_block_sel_012+1)%3;
+      else 
+        woz_block_sel_012=(woz_block_sel_012-1)%3;
 
-      int selP1=(woz_block_sel_012+1)%3;                                              // selector number for the track above within 0,1,2
-      int selM1=(woz_block_sel_012-1)%3;                                              // selector number for the track below within 0,1,2
+      if (woz_sel_trk[woz_block_sel_012]!=trk){                                       // If the track data is not loaded in the array
+        rSector[1]=getSDAddrWoz(trk,0,csize, database);                         // get the compute the memory addr for the SDCard
+        cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[woz_block_sel_012],blockNumber);
+        woz_sel_trk[woz_block_sel_012]=(trk);                                          // change the trk in the selector
+      }
 
-      if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                    // check if we need to load the track above                                                     
+      memcpy(DMA_BIT_BUFFER,woz_track_data_bloc[woz_block_sel_012],DMABlockSize);      // copy the new track data to the DMA Buffer
+      HAL_SPI_DMAResume(&hspi1);                                                       // restart the DMA engine 
+      t2 = DWT->CYCCNT;
+      diff = t2 - t1;
+      printf("timelapse trk change switch %ld cycles\n",diff);
+
+      prevTrk=trk;   
+      DWT->CYCCNT = 0;                                                                 // Reset cpu cycle counter
+      t1 = DWT->CYCCNT;
+      int selP1=(woz_block_sel_012+1)%3;                                               // selector number for the track above within 0,1,2
+      int selM1=(woz_block_sel_012-1)%3;                                               // selector number for the track below within 0,1,2
+
+      if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                     // check if we need to load the track above                                                     
         rSector[2]=getSDAddrWoz((trk+1),0,csize, database);                     // get the compute the memory addr for the SDCard
         cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[woz_block_sel_012],blockNumber);
         woz_sel_trk[selP1]=(trk+1);                                                    // change the trk in the selector
       }
 
       if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                       // check if we need to load the track above
-                                                             
         rSector[0]=getSDAddrWoz((trk-1),0,csize, database);                       // get the compute the memory addr for the SDCard
         cmd18GetDataBlocks(rSector[0],woz_track_data_bloc[woz_block_sel_012],blockNumber);
         woz_sel_trk[selP1]=(trk-1);                                                     // change the trk in the selector
       }
-
-      printf("trk:%d, loop:%2d block:%d sel012:%d\n",trk,jj,block,woz_block_sel_012);
+      t2 = DWT->CYCCNT;
+      diff = t2 - t1;
+      printf("timelapse other trks gathering %ld cycles\n",diff);
+      printf("trk:%d, loop:%2d sel012:%d\n",trk,jj,woz_block_sel_012);
     }
 
-    if (!isDiskIIDisable() && /* mountedNic==1 && */ prepareNewSector==1){
-      prepareNewSector=0;
-      trk=ph_track>>2;                                                  
-                                                                                     
-      jj++;
-      int n=currentBlock+blockNumber/2;
-      
-      
-      // 4 New data block per track has to be put in the right half buffer    
-      
-      if (trk!=0){
-        int selM1=(woz_block_sel_012-1)%3;                                          
-        rSector[0]=getSDAddrWoz((trk-1),n,csize, database);           // trk -1
-        cmd18GetDataBlocks(rSector[1],woz_track_data_bloc[selM1],blockNumber/2);
-      }
-      
-      rSector[1]=getSDAddrWoz(trk,n,csize, database);                 // Current trk
-      cmd18GetDataBlocks(rSector[1],woz_track_data_bloc[woz_block_sel_012],blockNumber/2);
-
-      if (trk!=35){
-        int selP1=(woz_block_sel_012+1)%3;
-        rSector[2]=getSDAddrWoz((trk+1),n,csize, database);             // trk +1
-        cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[selP1],blockNumber/2);
-      }   
-    }
     else if (updateFSFlag==1){
       printf("Here\n");
        walkDir(currentFullPath);
