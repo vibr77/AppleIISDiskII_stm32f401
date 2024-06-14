@@ -68,6 +68,8 @@ int  isDiskIIDisable();
 void processBtnInterrupt(uint16_t GPIO_Pin);
 void processDiskHeadMove(uint16_t GPIO_Pin);
 
+void dumpBuf(unsigned char * buf,long memoryAddr,int len);
+
 
 void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi);
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi);
@@ -85,6 +87,8 @@ void processSelectFSItem();
 
 void cmd17GetDataBlock(long memoryAdr,unsigned char *buffer);
 void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count);
+
+void getWozTrackBitStream(int trk,char * buffer);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

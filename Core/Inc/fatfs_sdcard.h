@@ -38,9 +38,9 @@ DRESULT SD_disk_ioctl (BYTE pdrv, BYTE cmd, void* buff);
 
 
 
-#define SPI_TIMEOUT 100
-extern SPI_HandleTypeDef  hspi2;
+#define SPI_TIMEOUT 50
+extern SPI_HandleTypeDef hspi2;
 #define HSPI_SDCARD     &hspi2
 #define SD_CS_PORT      GPIOB
-#define SD_CS_PIN     GPIO_PIN_12
+#define SD_CS_PIN       GPIO_PIN_12
 #endif

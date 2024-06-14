@@ -111,10 +111,14 @@ __attribute__((optimize("-Ofast"))) static bool SD_RxDataBlockFast(BYTE *buff, U
   Timer1 = 200;
   SPI_HandleTypeDef *hspi=&hspi2;
   uint32_t txallowed = 1U;
-  //__HAL_SPI_ENABLE(&hspi2);
+  __HAL_SPI_ENABLE(&hspi2);
   
   //unsigned long t1,t2,diff,ll;
   //ll=0;                                                               // Reset cpu cycle counter
+  do {
+    token = SPI_RxByte();
+  } while((token == 0xFF) && Timer1);
+  /*
   //t1 = DWT->CYCCNT;
   do {
     if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
@@ -126,12 +130,12 @@ __attribute__((optimize("-Ofast"))) static bool SD_RxDataBlockFast(BYTE *buff, U
         token= hspi->Instance->DR;
         txallowed = 1U;
       }
-      //ll++;
-  } while((token == 0xFF) /*&& Timer1*/);
+      
+  } while((token == 0xFF) && Timer1);
 
   //t2 = DWT->CYCCNT;
   if(token != 0xFE) return FALSE;
- 
+ */
   do{
       if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
         *(__IO uint8_t *)&hspi->Instance->DR = 0x0;
@@ -212,6 +216,7 @@ static BYTE SD_SendCmd(BYTE cmd, uint32_t arg)
 {
   uint8_t crc, res;
   /* wait SD ready */
+  //printf("SDCMD 0x%02X\n",cmd);
   if (SD_ReadyWait() != 0xFF) return 0xFF;
   /* transmit command */
   SPI_TxByte(cmd);          /* Command */
@@ -243,7 +248,7 @@ uint8_t getSDCMD(BYTE cmd, uint32_t arg){
 }
 
 bool getSDDataBlock(BYTE *buff, UINT len){
-  return SD_RxDataBlockFast(buff, len);
+  return SD_RxDataBlock(buff, len);
 }
 
 DSTATUS SD_disk_initialize(BYTE drv)

@@ -1,7 +1,7 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  *  FatFs - Generic FAT file system module  R0.12c (C)ChaN, 2017
+  *  FatFs - FAT file system module configuration file  R0.11 (C)ChaN, 2015
   ******************************************************************************
   * @attention
   *
@@ -108,7 +108,7 @@
 /   950 - Traditional Chinese (DBCS)
 */
 
-#define _USE_LFN     0    /* 0 to 3 */
+#define _USE_LFN     1    /* 0 to 3 */
 #define _MAX_LFN     255  /* Maximum LFN length to handle (12 to 255) */
 /* The _USE_LFN switches the support of long file name (LFN).
 /
@@ -159,7 +159,7 @@
 /* USER CODE BEGIN Volumes */
 #define _STR_VOLUME_ID          0	/* 0:Use only 0-9 for drive ID, 1:Use strings for drive ID */
 #define _VOLUME_STRS            "RAM","NAND","CF","SD1","SD2","USB1","USB2","USB3"
-/* _STR_VOLUME_ID switches string support of volume ID.
+/* _STR_VOLUME_ID option switches string volume ID feature.
 /  When _STR_VOLUME_ID is set to 1, also pre-defined strings can be used as drive
 /  number in the path name. _VOLUME_STRS defines the drive ID strings for each
 /  logical drives. Number of items must be equal to _VOLUMES. Valid characters for

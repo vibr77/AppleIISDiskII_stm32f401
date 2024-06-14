@@ -96,8 +96,8 @@ unsigned char prevTrk=0;                                    // prevTrk to keep t
 volatile unsigned char trkChangeFlg=0;                      // Head move & trk change according to TMAP Woz
 unsigned char mountedImageFile=0;                           // Image file mount status flag
 
-const unsigned int DMABlockSize=6656;                       // Size of the DMA Buffer => full track width with 13 block of 512
-unsigned char DMA_BIT_BUFFER[6656];                         // DMA Buffer from the SPI
+const unsigned int DMABlockSize=6656;//6592; // 6656                       // Size of the DMA Buffer => full track width with 13 block of 512
+unsigned char DMA_BIT_BUFFER[8192];                         // DMA Buffer from the SPI
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
                               
@@ -105,11 +105,8 @@ int woz_sel_trk[3];                                         // keep track number
 long database=0;                                            // start of the data segment in FAT
 int csize=0;                                                // Cluster size
 
-int rSector[3];
-
 const unsigned int blockNumber=13;                           // Number of block over 13 data block
-unsigned char woz_track_data_bloc[3][6656];                  // Char Array containing 3 tracks of 13 blocks 512 Bytes each
-
+                                                             // Char Array containing 3 tracks of 13 blocks 512 Bytes each
 unsigned int currentBlock=0;
 unsigned int nextBlock=0;           
 
@@ -175,14 +172,21 @@ void cmd17GetDataBlock(long memoryAdr,unsigned char *buffer){
 void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count){
   
   int ret=0;
-  if ((ret=getSDCMD(CMD17, memoryAdr) == 0)){
+  if ((ret=getSDCMD(CMD18, memoryAdr) == 0)){
     do{
-      if (!getSDDataBlock((BYTE *)buffer, 512)) break;
+      if (!getSDDataBlock((BYTE *)buffer, 512)){
+        printf("dirdel issue 2\n");
+        break;
+      }
+        
         buffer += 512;
-      } while (--count);
+    } while (--count);
       /* STOP_TRANSMISSION */
       getSDCMD(CMD12, 0);
-    }
+  }
+  else{
+    printf("dirdel issue 1\n");
+  }
 }
 
 /*
@@ -417,14 +421,14 @@ void processSelectFSItem(){
   }
   free(value);
 }
-/*
+
 int k1=0;
 unsigned char dbg_stp[1024];
 unsigned char dbg_newStp[1024];
 unsigned char dbg_prevStp[1024];
 unsigned char dbg_phtrk[1024];
 int dbg_move[1024];
-*/
+
 // Magnet States --> Stepper Motor Position
 //
 //                N
@@ -462,10 +466,9 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
   unsigned char stp=0;
   int  move=0;
   
-  if (isDiskIIDisable())
-    return;
+  //if (isDiskIIDisable())
+  //  return;
 
-  //stp = (GPIOB->IDR >> 8 & 0b0000000000001111);
   stp=(GPIOB->IDR&0b0000000000001111);
   int newPosition=magnet2Position[stp];
   int lastPosition=ph_track&7;
@@ -482,30 +485,22 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
 
   //int trk=ph_track>>2;                                                            
   int trk=TMAP[ph_track];
+  //printf("trk:%02d ph_track:%03d\n",trk,ph_track);
   if(trk!=0xFF && trk!=prevTrk){
     trkChangeFlg=1;
-   
+    //printf("%d\n",trk);
+    prevTrk=trk;
   }
 
-
-  /*if (k1<1024){
+  if (k1<1024){
     dbg_move[k1]=move;
     dbg_phtrk[k1]=ph_track;
     dbg_stp[k1]=stp;
     dbg_prevStp[k1]=lastPosition;
     dbg_newStp[k1]=newPosition;
-  }*/
+  }
 
-  /*if (move==0 || newPosition==-1){
-    char * cstp=byte_to_binary(stp);
-    char * cpstp=byte_to_binary(prevStp);
-    printf("%03d stp:%02d, lastPos:%02d, newPos:%02d,ph_track:%02d %s => %s move:%d \n",k1,stp,lastPosition,newPosition, ph_track,cpstp,cstp,move);
-    free(cstp);
-    free(cpstp);
-  }*/
-
-  //prevStp=stp;
-  //k1++;
+  k1++;
 
 }
 
@@ -516,6 +511,35 @@ long getSDAddrWoz(int trk,int block,int csize, long database){
   long rSector=database+(ft-2)*csize+(long_sector & (csize-1));
   return rSector;
 }
+
+long getSDAddrNic(int trk,int block,int csize, long database){
+  int long_sector = trk*16;
+  int long_cluster = long_sector >> 6;
+  int ft = fatClusterWOZ[long_cluster];
+  long rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+  return rSector;
+}
+
+void getNicTrackBitStream(int trk, char* buffer){
+  int addr=getSDAddrNic(trk,0,csize,database);
+  
+  char * tmp2=(char*)malloc(16*512*sizeof(char));
+  //printf("OK3\n");
+  cmd18GetDataBlocks(addr,tmp2,16);
+  for (int i=0;i<16;i++){
+    memcpy(buffer+i*412,tmp2+i*512,412);
+  }
+  free(tmp2);
+  return;
+}
+
+void getWozTrackBitStream(int trk,char * buffer){
+  int addr=getSDAddrWoz(trk,0,csize,database);
+  cmd18GetDataBlocks(addr,buffer,blockNumber);
+        
+  return;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -561,7 +585,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
- uint8_t Test[] = "\n\n******************************\r\n";                        // Data to send
+  uint8_t Test[] = "\n\n**************BOOTING ****************\r\n";                        // Data to send
 
   HAL_UART_Transmit(&huart1,Test,sizeof(Test),10);             // Sending in normal mode
   HAL_Delay(1000);
@@ -573,13 +597,16 @@ int main(void)
   currentClistPos=0;                                                                // Current index in the chained List
   lastlistPos=0;                                                                    // Last index in the chained list
 
-  int trk=0;                                                                        
+  int trk=0; 
+                                                                     
   unsigned long t1,t2,diff;
   currentFullPath[0]=0x0;                                                            // Root is ""
   
   fres = f_mount(&fs, "", 1);                                       
   if (fres == FR_OK) {
     walkDir(currentFullPath);
+  }else{
+    printf("Error mounting sdcard %d\n",fres);
   }
 
   initFSScreen(currentFullPath);
@@ -588,41 +615,46 @@ int main(void)
   csize=fs.csize;
   database=fs.database;
  
-  mountWozFile("BII.woz");
+  //mountWozFile("BII.NIC");
+  mountWozFile("Zaxxon.woz");
+  
 
-  unsigned char sectorBuf0[2048];
- /* 
+  //int filetype=1; // 1 for NIC 0 for WOZ
+/*
+  unsigned char sectorBuf0[6656];
+ 
   for (int i=0;i<13;i++){
-    rSector=getSDAddrWoz(trk,i,csize, database);
+    int rSector=getSDAddrWoz(trk,i,csize, database);
     cmd17GetDataBlock(rSector,sectorBuf0);
-    dumpBuf(sectorBuf0,i);
+    dumpBuf(sectorBuf0,i,512);
   }
-  */
+  
+*/
+  /*
+  unsigned char sectorBuf0[2048];
   DWT->CYCCNT = 0;                                                                  // Reset cpu cycle counter
   t1 = DWT->CYCCNT;
-  rSector[0]=getSDAddrWoz(trk,0,csize, database);
-  cmd18GetDataBlocks(rSector[0],sectorBuf0,4);
+  rSector=getSDAddrWoz(trk,0,csize, database);
+  cmd18GetDataBlocks(rSector,sectorBuf0,4);
   t2 = DWT->CYCCNT;
-  dumpBuf(sectorBuf0,rSector[0],2048);
+  dumpBuf(sectorBuf0,rSector,2048);
   
-  printf("computed rSector=%d\n",rSector[0]);
+  //printf("computed rSector=%d\n",rSector[0]);
 
   diff = t2 - t1;
   printf("timelapse cmd18GetDatablock %ld cycles\n",diff);
-  
+  */
   printf("Inside the twilight\n");
   fflush(stdout);
 
-  int jj=0;
-  /*
-  for (int i=0;i<DMABlockSize;i++){
-    DMA_BIT_BUFFER[i]=0x0;
-  }
-  */
-  memset(DMA_BIT_BUFFER,0,sizeof(char)*DMABlockSize);
 
+  memset(DMA_BIT_BUFFER,0,sizeof(char)*DMABlockSize);
+  
+  unsigned char woz_track_data_bloc[3*DMABlockSize]; 
+  
   for (int i=0;i<3;i++){
     woz_sel_trk[i]=-1;
+    memset(woz_track_data_bloc[i],0,sizeof(char)*DMABlockSize);
   }
 
   HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_RESET);
@@ -632,88 +664,118 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);                                // Start the PWN to for the Logic Analyzer to decode SPI with Pulse 250 Khz
   
   for (int i=0;i<45;i++)                                                            // Used for Logic Analyzer and sync between SPI and Timer PWM
-  __NOP();                                                                          // Macro to NOP assembly code
-
+    __NOP();                                                                          // Macro to NOP assembly code
+  //printf("OK1\n");
   /**
    * Init the buffer
   */
+  trk=0;
+  woz_block_sel_012=0;
+  
+  getWozTrackBitStream(0,woz_track_data_bloc);
+  woz_sel_trk[0]=0; 
+  //printf("OK2\n");
+  dumpBuf(woz_track_data_bloc+woz_block_sel_012*DMABlockSize,1,512);
+                                                                                    // change the trk in the selector
+  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc,DMABlockSize);       // copy the new track data to the DMA Buffer
+        
+  HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_BUFFER,DMABlockSize); 
 
-  cmd18GetDataBlocks(rSector[1],woz_track_data_bloc[woz_block_sel_012],blockNumber);
-  woz_sel_trk[woz_block_sel_012]=(trk);                                             // change the trk in the selector
-  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc[woz_block_sel_012],DMABlockSize);      // copy the new track data to the DMA Buffer
-      
-  HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_BUFFER,DMABlockSize);   
-
+  // Preload track 1
+  getWozTrackBitStream(1,woz_track_data_bloc+DMABlockSize);
+  woz_sel_trk[1]=1;
+  printf("track 1\n");
+  //dumpBuf(woz_track_data_bloc+1*DMABlockSize,1,512);
+  //memset(woz_track_data_bloc+1*DMABlockSize,0x55,6656); 
+  
+  // Preload track 2
+  getWozTrackBitStream(2,woz_track_data_bloc+2*DMABlockSize);
+  woz_sel_trk[2]=2; 
+  //printf("track 2\n");
+  //dumpBuf(woz_track_data_bloc+2*DMABlockSize,1,512);
+  
+     
+  int f=0;
   while (1){
   
-  /* 
-    if ((k1+1)%256==0 && k1<1024){
-      for (int i=0;i<256;i++){
+    /*
+    if ((k1+1)%128==0 && k1<1024){
+      for (int i=0;i<128;i++){
         char * cstp=byte_to_binary(dbg_stp[i]);
         char * cpstp=byte_to_binary(dbg_prevStp[i]);
         printf("%04d stp:%02d, newStp:%03d, prevStp:%03d,ph_track:%03d %s => %s move:%d \n",i,dbg_stp[i],dbg_newStp[i],dbg_prevStp[i], dbg_phtrk[i],cpstp,cstp,dbg_move[i]);
         free(cstp);
         free(cpstp);
       }
-    }
-  */
+    }*/
+    
   
-    if (!isDiskIIDisable() && trkChangeFlg==1 && mountedImageFile==1){                                                                  // Track has changed
-      trkChangeFlg=0;                                                                 // Important to change the flag at the top
-      trk=TMAP[ph_track];                                                               
+    if (/*!isDiskIIDisable() &&*/ trkChangeFlg==1 && mountedImageFile==1){                                                                  // Track has changed
+      trkChangeFlg=0;                                                                // Important to change the flag at the top
+      trk=TMAP[ph_track]; 
+                                                                    
       //trk=ph_track>>2;                                                             // current track <!> todo manage from TMAP
+      f=0;
+      unsigned int fp1=0,fm1=0;
       DWT->CYCCNT = 0;                                                               // Reset cpu cycle counter
       t1 = DWT->CYCCNT;
       
       HAL_SPI_DMAPause(&hspi1);                                                       // Pause the current DMA
-      if (trk>prevTrk)                                                                // Rotate to the active array selector
-        woz_block_sel_012=(woz_block_sel_012+1)%3;
-      else 
-        woz_block_sel_012=(woz_block_sel_012-1)%3;
-
-      if (woz_sel_trk[woz_block_sel_012]!=trk){                                       // If the track data is not loaded in the array
-        rSector[1]=getSDAddrWoz(trk,0,csize, database);                         // get the compute the memory addr for the SDCard
-        cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[woz_block_sel_012],blockNumber);
-        woz_sel_trk[woz_block_sel_012]=(trk);                                          // change the trk in the selector
+      for (int i=0;i<3;i++){
+        if (woz_sel_trk[i]==trk){
+          f=1;
+          woz_block_sel_012=i;
+          break;
+        }
       }
 
-      memcpy(DMA_BIT_BUFFER,woz_track_data_bloc[woz_block_sel_012],DMABlockSize);      // copy the new track data to the DMA Buffer
-      HAL_SPI_DMAResume(&hspi1);                                                       // restart the DMA engine 
+      if (f!=1){
+        woz_block_sel_012=1;
+        getWozTrackBitStream(trk,woz_track_data_bloc+woz_block_sel_012*DMABlockSize);
+        woz_sel_trk[1]=trk;       
+      }
+
+      memcpy(DMA_BIT_BUFFER,woz_track_data_bloc+woz_block_sel_012*DMABlockSize,DMABlockSize);      // copy the new track data to the DMA Buffer
+      HAL_SPI_DMAResume(&hspi1); 
+      
       t2 = DWT->CYCCNT;
       diff = t2 - t1;
-      printf("timelapse trk change switch %ld cycles\n",diff);
 
-      prevTrk=trk;   
+     // printf("newtrk:%02d prevtrk:%02d sel012 %02d woz_sel_trk:%02d-%02d-%02d\n",trk,prevTrk,woz_block_sel_012,woz_sel_trk[0],woz_sel_trk[1],woz_sel_trk[2]);
+   
       DWT->CYCCNT = 0;                                                                 // Reset cpu cycle counter
       t1 = DWT->CYCCNT;
+
       int selP1=(woz_block_sel_012+1)%3;                                               // selector number for the track above within 0,1,2
       int selM1=(woz_block_sel_012-1)%3;                                               // selector number for the track below within 0,1,2
 
-      if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                     // check if we need to load the track above                                                     
-        rSector[2]=getSDAddrWoz((trk+1),0,csize, database);                     // get the compute the memory addr for the SDCard
-        cmd18GetDataBlocks(rSector[2],woz_track_data_bloc[woz_block_sel_012],blockNumber);
+      if (woz_sel_trk[selP1]==(trk+1)){
+        fp1=1;
+      }
+      else if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                     // check if we need to load the track above                                                     
+        getWozTrackBitStream(trk+1,woz_track_data_bloc+selP1*DMABlockSize);     
         woz_sel_trk[selP1]=(trk+1);                                                    // change the trk in the selector
       }
 
-      if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                       // check if we need to load the track above
-        rSector[0]=getSDAddrWoz((trk-1),0,csize, database);                       // get the compute the memory addr for the SDCard
-        cmd18GetDataBlocks(rSector[0],woz_track_data_bloc[woz_block_sel_012],blockNumber);
-        woz_sel_trk[selP1]=(trk-1);                                                     // change the trk in the selector
+      if (woz_sel_trk[selM1]==(trk-1)){
+        fm1=1;
+      }
+      else if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                      // check if we need to load the track above
+        getWozTrackBitStream(trk-1,woz_track_data_bloc+selM1*DMABlockSize);     
+        woz_sel_trk[selM1]=(trk-1);                                                    // change the trk in the selector
       }
       t2 = DWT->CYCCNT;
       diff = t2 - t1;
-      printf("timelapse other trks gathering %ld cycles\n",diff);
-      printf("trk:%d, loop:%2d sel012:%d\n",trk,jj,woz_block_sel_012);
+      printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %02d %d-%d-%d %ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff);
     }
 
     else if (updateFSFlag==1){
-      printf("Here\n");
-       walkDir(currentFullPath);
+      walkDir(currentFullPath);
       initFSScreen("");
       displayFSItem(); 
       updateFSFlag=0;
     }
-    //HAL_Delay(100);
+    
 
     /* USER CODE END WHILE */
 
@@ -901,7 +963,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 64;
+  htim1.Init.Period = 255;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
@@ -1066,10 +1128,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
   //printf("startr here 0\n");
-  if(GPIO_Pin == GPIO_PIN_8  ||           // Step 0 PB8
-     GPIO_Pin == GPIO_PIN_9  ||           // Step 1 PB9
-     GPIO_Pin == GPIO_PIN_10 ||           // Step 2 PB10
-     GPIO_Pin == GPIO_PIN_11  ) {         // Step 3 PB11
+  if(GPIO_Pin == GPIO_PIN_0  ||           // Step 0 PB8
+     GPIO_Pin == GPIO_PIN_1  ||           // Step 1 PB9
+     GPIO_Pin == GPIO_PIN_2 ||           // Step 2 PB10
+     GPIO_Pin == GPIO_PIN_3  ) {         // Step 3 PB11
     processDiskHeadMove(GPIO_Pin);
    
   }else if (GPIO_Pin == GPIO_PIN_4 ||     // BTN_RETURN
