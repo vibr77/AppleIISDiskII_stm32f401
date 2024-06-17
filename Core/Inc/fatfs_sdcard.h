@@ -2,6 +2,7 @@
 #include "main.h"
 uint8_t getSDCMD(BYTE cmd, uint32_t arg);
 bool getSDDataBlock(BYTE *buff, UINT len);
+bool getSDDataBlockBareMetal(BYTE *buff, UINT len);
 
 
 #ifndef __FATFS_SD_H
@@ -36,7 +37,7 @@ DRESULT SD_disk_write (BYTE pdrv, const BYTE* buff, DWORD sector, UINT count);
 DRESULT SD_disk_ioctl (BYTE pdrv, BYTE cmd, void* buff);
 
 
-
+#define _USE_WRITE 1
 
 #define SPI_TIMEOUT 50
 extern SPI_HandleTypeDef hspi2;

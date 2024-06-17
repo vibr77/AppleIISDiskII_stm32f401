@@ -111,45 +111,68 @@ __attribute__((optimize("-Ofast"))) static bool SD_RxDataBlockFast(BYTE *buff, U
   Timer1 = 200;
   SPI_HandleTypeDef *hspi=&hspi2;
   uint32_t txallowed = 1U;
-  __HAL_SPI_ENABLE(&hspi2);
+  
+  if ((hspi->Instance->CR1 & SPI_CR1_SPE) != SPI_CR1_SPE)
+  {
+    /* Enable SPI peripheral */
+    __HAL_SPI_ENABLE(hspi);
+  }
   
   //unsigned long t1,t2,diff,ll;
   //ll=0;                                                               // Reset cpu cycle counter
-  do {
+ /* do {
     token = SPI_RxByte();
   } while((token == 0xFF) && Timer1);
-  /*
-  //t1 = DWT->CYCCNT;
-  do {
-    if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
-       *(__IO uint8_t *)&hspi->Instance->DR = 0x0;
+*/
+ do{
+      if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
+        *(__IO uint8_t *)&hspi->Instance->DR = 0xFF;
         txallowed = 0U;
-    }
+      }
 
       if (__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_RXNE)){
-        token= hspi->Instance->DR;
+         token= hspi->Instance->DR;
+      
         txallowed = 1U;
       }
-      
-  } while((token == 0xFF) && Timer1);
 
-  //t2 = DWT->CYCCNT;
+	  }while((token == 0xFF) && Timer1);
+
+ 
   if(token != 0xFE) return FALSE;
- */
+ 
   do{
       if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
-        *(__IO uint8_t *)&hspi->Instance->DR = 0x0;
+        *(__IO uint8_t *)&hspi->Instance->DR = 0xFF;
         txallowed = 0U;
       }
 
       if (__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_RXNE)){
-         *buff++= hspi->Instance->DR;
+        *buff= hspi->Instance->DR;
+        buff++;
         len--;
         txallowed = 1U;
       }
-      //ll++;
 
 	  }while(len);
+
+  
+
+  /* Clear overrun flag in 2 Lines communication mode because received is not read */
+  if (hspi->Init.Direction == SPI_DIRECTION_2LINES)
+  {
+    __HAL_SPI_CLEAR_OVRFLAG(hspi);
+  }
+
+  
+  hspi->State = HAL_SPI_STATE_READY;
+
+
+
+    /* discard CRC */
+
+    SPI_RxByte();
+    SPI_RxByte();
     
   //  diff = t2 - t1;
   // printf("ll=%ld\n",ll);
@@ -249,6 +272,10 @@ uint8_t getSDCMD(BYTE cmd, uint32_t arg){
 
 bool getSDDataBlock(BYTE *buff, UINT len){
   return SD_RxDataBlock(buff, len);
+}
+
+bool getSDDataBlockBareMetal(BYTE *buff, UINT len){
+  return SD_RxDataBlockFast(buff, len);
 }
 
 DSTATUS SD_disk_initialize(BYTE drv)

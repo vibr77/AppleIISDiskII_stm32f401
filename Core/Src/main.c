@@ -32,11 +32,14 @@ Current status: NOT WORKING
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "display.h"
 #include "fatfs_sdcard.h"
 #include "list.h"
 #include "woz.h"
+#include "configFile.h"
+//#include "parson.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +67,7 @@ SPI_HandleTypeDef hspi2;
 DMA_HandleTypeDef hdma_spi1_tx;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
 
@@ -87,7 +91,9 @@ static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
+bool buttonDebounceState=true;
 
 volatile int ph_track=0;                                    // SDISK Physical track 0 - 139
 volatile int prevPh_track=0;
@@ -100,6 +106,7 @@ const unsigned int DMABlockSize=6656;//6592; // 6656                       // Si
 unsigned char DMA_BIT_BUFFER[8192];                         // DMA Buffer from the SPI
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
+unsigned int whiteNoise=0; 
                               
                                                             // trk 0-35
 long database=0;                                            // start of the data segment in FAT
@@ -108,12 +115,29 @@ int csize=0;                                                // Cluster size
 const unsigned int blockNumber=13;                           // Number of block over 13 data block
                                                              // Char Array containing 3 tracks of 13 blocks 512 Bytes each
 unsigned int currentBlock=0;
-unsigned int nextBlock=0;           
+unsigned int nextBlock=0; 
 
-extern unsigned int fatClusterWOZ[20];
+int (*getTrackBitStream)(int,unsigned char*);
+
+long (*getSDAddr)(int ,int ,int , long);
+int  (*getTrackFromPh)(int);
+
+enum page currentPage=0;
+enum action nextAction=NONE;
+void (*ptrbtnUp)(void *);
+void (*ptrbtnDown)(void *);
+void (*ptrbtnEntr)(void *);
+void (*ptrbtnRet)(void *);
+
+
+
+extern unsigned int fatCluster[20];
 extern __uint16_t BLK_startingBlocOffset[160];
 extern __uint8_t TMAP[160];
+extern woz_info_t wozFile;
 
+extern JSON_Object *configParams;
+char selItem[256];
 char currentFullPath[1024];                                     // Path from root
                                                                 // Path
 int lastlistPos;
@@ -189,6 +213,26 @@ void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count){
   }
 }
 
+void cmd18GetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,int count){
+  
+  int ret=0;
+  if ((ret=getSDCMD(CMD18, memoryAdr) == 0)){
+    do{
+      if (!getSDDataBlockBareMetal((BYTE *)buffer, 512)){
+        printf("SDCard getSDDataBlockBareMetal Error\n");
+        break;
+      }
+        
+        buffer += 512;
+    } while (--count);
+      /* STOP_TRANSMISSION */
+      getSDCMD(CMD12, 0);
+  }
+  else{
+    printf("SDCard cmd18 Error\n");
+  }
+}
+
 /*
  The next 2 functions are called during the DMA transfer from Memory to SPI1
  2 buffers are used to managed the timing of getting the data from the SDCard & populating the buffer
@@ -197,51 +241,98 @@ void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count){
 */
 
 void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi){
-  // First half of the DMA Buffer has been sent, load first half with next 256 Bytes
-  //nextBlock=currentBlock+1;
-  //int offset=(nextBlock)%(blockNumber/2)*DMABlockSize;
-  //int half_sel=(nextBlock/(blockNumber/2))%2;                           //0 -> 0,1,2,3
-                                                                          //1 -> 4,5,6,7
-                                                                          //0 -> 8,9,10,11
-                                                                          //1 -> 12
-  //memcpy(DMA_BIT_BUFFER,&woz_track_data_bloc[woz_block_sel_012],DMABlockSize/2);
+  
+  if (whiteNoise==1){                                // Enable non repeatable white noise on the first half track
+    for (int i=0;i<DMABlockSize/2;i++){
+          DMA_BIT_BUFFER[i]=rand();
+    }
+
+  }
   return;
 }
 
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
-  // Second half is finished // load next second half
-  //currentBlock=(currentBlock+1)%13;
-  //int offset=(nextBlock)%(blockNumber/2)*DMABlockSize+DMABlockSize/2;
-  //int half_sel=(nextBlock/(blockNumber/2))%2;                           //0 -> 0,1,2,3
-                                                                          //1 -> 4,5,6,7
-                                                                          //0 -> 8,9,10,11
-                                                                          //1 -> 12
-  //int offset=DMABlockSize/2;
-  //memcpy(DMA_BIT_BUFFER+offset,woz_track_data_bloc[woz_block_sel_012]+offset,DMABlockSize/2);
 
-  //if (nextBlock%(blockNumber/2)==0)       // nextBlock==0, 4, 8, 12
-  //  prepareNewSector=1;
+  if (whiteNoise==1){                                // Enable non repeatable white noise on the second half track
+    for (int i=DMABlockSize/2;i<DMABlockSize;i++){   
+          DMA_BIT_BUFFER[i]=rand();
+    }
+  }
   return;
 }
 
+/**
+  * @brief sort a new chainedlist of item alphabetically
+  * @param list to be sorted
+  * @retval the new list
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+
+  UNUSED(htim);
+  if (htim!=&htim2)
+    return;
+
+	if(HAL_GPIO_ReadPin(GPIOC, BTN_UP_Pin) == GPIO_PIN_RESET &&
+    HAL_GPIO_ReadPin(GPIOC, BTN_DOWN_Pin) == GPIO_PIN_RESET &&
+    HAL_GPIO_ReadPin(GPIOC, BTN_ENTR_Pin) == GPIO_PIN_RESET &&
+    HAL_GPIO_ReadPin(GPIOB, BTN_RET_Pin) == GPIO_PIN_RESET 
+  ){
+
+		buttonDebounceState = true;
+		HAL_TIM_Base_Stop_IT(&htim2);
+	}
+}
+
+/**
+  * @brief sort a new chainedlist of item alphabetically
+  * @param list_t * plst
+  * @retval None
+  */
+list_t * sortLinkedList(list_t * plst){
+  list_t *  sorteddirChainedList = list_new();
+  list_node_t *pItem;
+  list_node_t *cItem;
+  int z=0;
+  int i=0;
+  do{
+    pItem=list_at(plst,0);
+    for (i=0;i<plst->len;i++){
+      cItem=list_at(plst,i);
+      z=strcmp(pItem->val,cItem->val);
+      if (z>0){
+        pItem=cItem;
+        i=0;
+      }
+    }
+    
+    list_rpush(sorteddirChainedList, list_node_new(pItem->val));
+    list_remove(plst,pItem);
+  }while (plst->len>0);
+  list_destroy(plst);
+  return sorteddirChainedList; 
+}
+
+/**
+  * @brief Build & sort a new chainedlist of file/dir item based on the current path
+  * @param path
+  * @retval None
+  */
 void walkDir(char * path){
   DIR dir;
   FRESULT     fres;  
-  char string[384];
-  printf("walkdir |%s|\n",path);
+  
   fres = f_opendir(&dir, path);
  
-  printf("Directory Listing\n");
+  printf("Directory Listing:%s\n",path);
   if (fres != FR_OK)
-    printf("res = %d f_opendir\n", fres);
+    printf("Error f_opendir:%d\n", fres);
 
   char * fileName;
   int len;
-
+  lastlistPos=0;
   dirChainedList=list_new();
-  printf("going in \n");
-  if (fres == FR_OK)
-  {
+
+  if (fres == FR_OK){
       if (strcmp(path,"") && strcmp(path,"/")){
         fileName=malloc(128*sizeof(char));
         sprintf(fileName,"D|..");
@@ -249,64 +340,58 @@ void walkDir(char * path){
         lastlistPos++;
       }
       
-      while(1)
-      {
+      while(1){
         FILINFO fno;
 
         fres = f_readdir(&dir, &fno);
  
         if (fres != FR_OK)
-          printf("res = %d f_readdir\n", fres);
+          printf("Error f_readdir:%d\n", fres);
  
         if ((fres != FR_OK) || (fno.fname[0] == 0))
           break;
                                                                           // 256+2
         len=(int)strlen(fno.fname);                                       // Warning strlen
-        if (((fno.fattrib & AM_DIR)&& len>2) ||                           // Listing Directories & File with NIC extension
-            (len>5 && 
-             fno.fname[len-4]=='.'   &&
-             fno.fname[len-3]=='N'   &&
-             fno.fname[len-2]=='I'   && 
-             fno.fname[len-1]=='C'   &&
-             !(fno.fattrib & AM_SYS) &&                                  // Not System file
-             !(fno.fattrib & AM_HID)                                     // Not Hidden file
+        
+        if (((fno.fattrib & AM_DIR) && 
+            !(fno.fattrib & AM_HID) && len>2 && fno.fname[0]!='.' ) ||     // Listing Directories & File with NIC extension
+            (len>5 &&
+            (!memcmp(fno.fname+(len-4),"\x2E\x4E\x49\x43",4)  ||           // .NIC
+             !memcmp(fno.fname+(len-4),"\x2E\x6E\x69\x63",4)  ||           // .nic
+             !memcmp(fno.fname+(len-4),"\x2E\x57\x4F\x5A",4)  ||           // .WOZ
+             !memcmp(fno.fname+(len-4),"\x2E\x77\x6F\x7A",4)) &&           // .woz
+             !(fno.fattrib & AM_SYS) &&                                    // Not System file
+             !(fno.fattrib & AM_HID)                                       // Not Hidden file
              )
-             ||
-              (len>5 && 
-             fno.fname[len-4]=='.'   &&
-             fno.fname[len-3]=='d'   &&
-             fno.fname[len-2]=='s'   && 
-             fno.fname[len-1]=='k'   &&
-             !(fno.fattrib & AM_SYS) &&                                  // Not System file
-             !(fno.fattrib & AM_HID)                                     // Not Hidden file
-             )
+             
              ){
-
-        fileName=malloc(128*sizeof(char));
-        if (fno.fattrib & AM_DIR){
-          fileName[0]='D';
-          fileName[1]='|';
-          strcpy(fileName+2,fno.fname);
-        }else{
-          fileName[0]='F';
-          fileName[1]='|';
-          memcpy(fileName+2,fno.fname,len);
-          fileName[len+2]=0x0;
-        }
-          list_rpush(dirChainedList, list_node_new(fileName));
-          lastlistPos++;
-        }
+              
+          fileName=malloc(64*sizeof(char));
+          if (fno.fattrib & AM_DIR){
+            fileName[0]='D';
+            fileName[1]='|';
+            strcpy(fileName+2,fno.fname);
+          }else{
+            fileName[0]='F';
+            fileName[1]='|';
+            memcpy(fileName+2,fno.fname,len);
+            fileName[len+2]=0x0;
+          }
+            list_rpush(dirChainedList, list_node_new(fileName));
+            lastlistPos++;
+          }
        
-        sprintf(string, "%c%c%c%c %10d %s/%s",
+        printf( "%c%c%c%c %10d %s/%s\n",
           ((fno.fattrib & AM_DIR) ? 'D' : '-'),
           ((fno.fattrib & AM_RDO) ? 'R' : '-'),
           ((fno.fattrib & AM_SYS) ? 'S' : '-'),
           ((fno.fattrib & AM_HID) ? 'H' : '-'),
           (int)fno.fsize, path, fno.fname);
  
-        printf("%s\n",string);
       }
     }
+  
+  dirChainedList=sortLinkedList(dirChainedList);
   f_closedir(&dir);
 }
 
@@ -315,51 +400,47 @@ void walkDir(char * path){
   * @param None
   * @retval None
   */
-
 int isDiskIIDisable(){
   return HAL_GPIO_ReadPin(GPIOB,GPIO_PIN_4);
 }
 
 /**
-  * @brief  Trigger by External GPIO Interrupt PORT B 
-  *         Step0 PIN_8,
-  *         Step1 PIN_9,
-  *         Step2 PIN_10,
-  *         Step3 PIN_11      
-  * @param None
+  * @brief  Trigger by External GPIO Interrupt 
+  *         pointer to function according the page are linked to relevant function;   
+  * @param GPIO_Pin
   * @retval None
   */
+void processBtnInterrupt(uint16_t GPIO_Pin){     
 
-
-void processBtnInterrupt(uint16_t GPIO_Pin){
-
-  /***
-   * GPIO_PA4   // BTN RETURN
-  *  GPIO_PA3   // BTN ENTER
-   * GPIO_PA2   // BTN DOWN
-   * GPIO_PA1   // BTN UP
-   **/
-
-   //if (mountedNic==0){
-
-    if (GPIO_Pin==BTN_UP_Pin || GPIO_Pin==BTN_DOWN_Pin || GPIO_Pin==BTN_ENTR_Pin){
-      if (GPIO_Pin==BTN_UP_Pin){
-        processPrevFSItem();
-        printf("BTN UP\n");
-      }
-    
-      if (GPIO_Pin==BTN_DOWN_Pin){
-        processNextFSItem();
-        printf("BTN DOWN\n");
-      }
-        
-      if (GPIO_Pin==BTN_ENTR_Pin){
-        processSelectFSItem();
-        printf("BTN SLC\n");
-      }
-    }
-  
+  switch (GPIO_Pin){
+    case BTN_UP_Pin:
+      ptrbtnDown(NULL);
+      printf("BTN UP\n"); 
+      break;
+    case BTN_DOWN_Pin:
+      ptrbtnUp(NULL);
+      printf("BTN DOWN\n");
+      break;
+    case BTN_ENTR_Pin:
+      ptrbtnEntr(NULL);
+      printf("BTN ENT\n");
+      break;
+    case BTN_RET_Pin:
+      ptrbtnRet(NULL);
+      printf("BTN RET\n");
+      break;
+    default:
+      break;
+  }       
 }
+
+/**
+  * @brief  processPrevFSItem(), processNextFSItem(), processSelectFSItem()
+  *         are functions linked to button DOWN/UP/ENTER to manage fileSystem information displayed,
+  *         and trigger the action   
+  * @param  Node
+  * @retval None
+  */
 
 int currentClistPos;
 int nextClistPos;
@@ -370,17 +451,18 @@ void processPrevFSItem(){
     }else{
       nextClistPos=currentClistPos-1;
     }
-    updateFSDisplay();
+    updateFSDisplay(0);
 }
 
 void processNextFSItem(){ 
+    
     if (currentClistPos<(lastlistPos-1)){
       nextClistPos=currentClistPos+1;
     }else{
       nextClistPos=0;
     }
 
-    updateFSDisplay();
+    updateFSDisplay(0);
 }
 
 void processSelectFSItem(){
@@ -388,46 +470,115 @@ void processSelectFSItem(){
   if (updateFSFlag==1)
     return;
 
-  updateFSFlag=1;  
-  // Either Mount File or go down in Directory listing
   list_node_t *pItem=NULL;
-  char * value=NULL;
+  
   pItem=list_at(dirChainedList, currentClistPos);
-  value=(char*)malloc(258*sizeof(char));
-  sprintf(value,"%s",(char*)pItem->val);
-  printf("value %s\n",value);
+  sprintf(selItem,"%s",(char*)pItem->val);
+  
   int len=strlen(currentFullPath);
-  if (value[2]=='.' && value[3]=='.'){
-    printf("oula0 :%s\n",currentFullPath);
+  if (selItem[2]=='.' && selItem[3]=='.'){                // selectedItem is [UpDir];
     for (int i=len-1;i!=-1;i--){
       if (currentFullPath[i]=='/'){
         currentFullPath[i]=0x0;
-        printf("oula %s\n",currentFullPath);
+        nextAction=FSDISP;
         break;
       }
       if (i==0)
         currentFullPath[0]=0x0;
     }
+  }else if (selItem[0]=='D' && selItem[1]=='|'){        // selectedItem is a directory
+    sprintf(currentFullPath+len,"/%s",selItem+2);
+    nextAction=FSDISP;
   }else{
-    sprintf(currentFullPath+len,"/%s",value+2);
+    swithPage(MOUNT,selItem);
   }
-  
   printf("result |%s|\n",currentFullPath);
-  if (value[0]=='D' || value[1]=='|'){
-    list_destroy(dirChainedList);
-    updateFSFlag=1;
-  }else{
-   //mountNIC(currentFullPath);
-  }
-  free(value);
+  
 }
 
+int toggle=1;
+void processToogleOption(){
+  
+  if (toggle==1){
+    toggle=0;
+    toggleMountOption(0);
+  }else{
+    toggle=1;
+    toggleMountOption(1);
+  }
+}
+
+void processMountOption(){
+  if (toggle==0){
+    swithPage(FS,NULL);
+    toggle=1;                               // rearm toggle switch
+  }else{
+    
+    nextAction=IMG_MOUNT;                       // Mounting can not be done via Interrupt, must be done via the main thread
+    swithPage(FS,NULL);
+  }
+}
+
+void nothing(){
+  __NOP();
+}
+
+void processBtnRet(){
+  if (currentPage==MOUNT){
+    swithPage(FS,NULL);
+  }else if (currentPage==FS){
+
+  }
+}
+
+void swithPage(enum page newPage,void * arg){
+
+// Manage with page to display and the attach function to button Interrupt  
+  
+  switch(newPage){
+    case FS:
+      initFSScreen(currentFullPath);
+      updateFSDisplay(1);
+      ptrbtnUp=processNextFSItem;
+      ptrbtnDown=processPrevFSItem;
+      ptrbtnEntr=processSelectFSItem;
+      ptrbtnRet=nothing;
+      currentPage=FS;
+      break;
+    case MENU:
+      break;
+    case IMAGE:
+       initIMAGEScreen(selItem+2,0);
+       ptrbtnUp=nothing;
+       ptrbtnDown=nothing;
+       ptrbtnRet=nothing;
+       ptrbtnRet=processBtnRet;
+       currentPage=IMAGE;
+      break;
+    case MOUNT:
+      mountImageScreen((char*)arg+2);
+      ptrbtnEntr=processMountOption;
+      ptrbtnUp=processToogleOption;
+      ptrbtnDown=processToogleOption;
+      ptrbtnRet=processBtnRet;
+      currentPage=MOUNT;
+      break;
+    default:
+      break;
+
+
+  }
+}
+
+
+/* // ONLY FOR DEBUGGING
 int k1=0;
 unsigned char dbg_stp[1024];
 unsigned char dbg_newStp[1024];
 unsigned char dbg_prevStp[1024];
 unsigned char dbg_phtrk[1024];
 int dbg_move[1024];
+*/
 
 // Magnet States --> Stepper Motor Position
 //
@@ -466,8 +617,10 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
   unsigned char stp=0;
   int  move=0;
   
-  //if (isDiskIIDisable())
-  //  return;
+  /*
+  if (isDiskIIDisable())
+    return;
+  */
 
   stp=(GPIOB->IDR&0b0000000000001111);
   int newPosition=magnet2Position[stp];
@@ -483,15 +636,15 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
   if (ph_track>139)                                                                 // <!> to be changed according to Woz info
     ph_track=139;                                             
 
-  //int trk=ph_track>>2;                                                            
-  int trk=TMAP[ph_track];
+                                                             
+  int trk=getTrackFromPh(ph_track);
   //printf("trk:%02d ph_track:%03d\n",trk,ph_track);
-  if(trk!=0xFF && trk!=prevTrk){
+  if(/*trk!=255 && */ trk!=prevTrk){
     trkChangeFlg=1;
-    //printf("%d\n",trk);
-    prevTrk=trk;
+    //printf("fuck %d\n",trk);
+    //prevTrk=trk;
   }
-
+  /*
   if (k1<1024){
     dbg_move[k1]=move;
     dbg_phtrk[k1]=ph_track;
@@ -501,43 +654,146 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
   }
 
   k1++;
+  */
 
 }
 
 long getSDAddrWoz(int trk,int block,int csize, long database){
-  int long_sector = BLK_startingBlocOffset[trk] + block;
-  int long_cluster = long_sector >> 6;
-  int ft = fatClusterWOZ[long_cluster];
-  long rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+  long rSector=-1;
+  if (wozFile.version==2){
+    int long_sector = BLK_startingBlocOffset[trk] + block;
+    int long_cluster = long_sector >> 6;
+    int ft = fatCluster[long_cluster];
+    rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+  }else if (wozFile.version==1){
+    int long_sector = 13*trk;                                // 13 block of 512 per track
+    int long_cluster = long_sector >> 6;
+    int ft = fatCluster[long_cluster];
+    rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+  }
+  
   return rSector;
 }
 
 long getSDAddrNic(int trk,int block,int csize, long database){
   int long_sector = trk*16;
   int long_cluster = long_sector >> 6;
-  int ft = fatClusterWOZ[long_cluster];
+  int ft = fatCluster[long_cluster];
   long rSector=database+(ft-2)*csize+(long_sector & (csize-1));
   return rSector;
 }
 
-void getNicTrackBitStream(int trk, char* buffer){
+int getNicTrackBitStream(int trk,unsigned  char* buffer){
   int addr=getSDAddrNic(trk,0,csize,database);
+  if (addr==-1){
+    printf("Error getting SDCard Address for nic\n");
+    return -1;
+  }
   
-  char * tmp2=(char*)malloc(16*512*sizeof(char));
-  //printf("OK3\n");
-  cmd18GetDataBlocks(addr,tmp2,16);
+  unsigned char * tmp2=(unsigned char*)malloc(16*512*sizeof(char));
+  if (tmp2==NULL){
+    printf("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes");
+    return -1;
+  }
+
+  cmd18GetDataBlocksBareMetal(addr,tmp2,16);
+
   for (int i=0;i<16;i++){
     memcpy(buffer+i*412,tmp2+i*512,412);
   }
   free(tmp2);
-  return;
+  return 1;
 }
 
-void getWozTrackBitStream(int trk,char * buffer){
+int getWozTrackBitStream(int trk,unsigned char * buffer){
   int addr=getSDAddrWoz(trk,0,csize,database);
-  cmd18GetDataBlocks(addr,buffer,blockNumber);
+  
+  if (addr==-1){
+    printf("Error getting SDCard Address for woz\n");
+    return -1;
+  }
+  
+  if (wozFile.version==2){
+    cmd18GetDataBlocksBareMetal(addr,buffer,blockNumber);
+  }else if (wozFile.version==1){
+    unsigned char * tmp2=(unsigned char*)malloc(14*512*sizeof(char));
+    if (tmp2==NULL){
+      printf("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes");
+      return -1;
+    }
+
+    cmd18GetDataBlocksBareMetal(addr,tmp2,blockNumber+1);
+    memcpy(buffer,tmp2+256,blockNumber*512-10);                                       // Last 10 Bytes are not Data Stream Bytes
+    free(tmp2);
+  }
         
-  return;
+  return 1;
+}
+
+int getNicTrackFromPh(int phtrack){
+  return phtrack>>2;
+}
+
+int getWozTrackFromPh(int phtrack){
+   return TMAP[phtrack];
+}
+
+int mountNIC(char * filename){
+   
+  FRESULT fres; 
+  FIL fil;  
+
+  fres = f_open(&fil,filename , FA_READ);     // Step 2 Open the file long naming
+
+  if(fres != FR_OK){
+    printf("File open Error: (%i)\r\n", fres);
+   
+    return -1;
+  }
+
+  long clusty=fil.obj.sclust;
+  int i=0;
+  fatCluster[i]=clusty;
+  printf("file cluster %d:%ld\n",i,clusty);
+  
+  while (clusty!=1 && i<30){
+    i++;
+    clusty=get_fat((FFOBJID*)&fil,clusty);
+    printf("file cluster %d:%ld\n",i,clusty);
+    fatCluster[i]=clusty;
+  }
+
+  mountedImageFile=1;
+  f_close(&fil);
+
+  return 0;
+}
+
+int mountImagefile(char* path,char * filename){
+  int l=0;
+  if (filename==NULL)
+    return -1;
+  char fullp[1024];
+  sprintf(fullp,"%s%s",path,filename+2);
+  
+  printf("Mounting image %s\n",fullp);
+  l=strlen(filename);
+  if (l>4 && 
+      (!memcmp(filename+(l-4),"\x2E\x4E\x49\x43",4)  ||           // .NIC
+       !memcmp(filename+(l-4),"\x2E\x6E\x69\x63",4))){            // .nic
+     mountWozFile(fullp);
+     getSDAddr=getSDAddrNic;
+     getTrackBitStream=getNicTrackBitStream;
+     getTrackFromPh=getNicTrackFromPh;
+  }else if (l>4 && 
+      (!memcmp(filename+(l-4),"\x2E\x57\x4F\x5A",4)  ||           // .WOZ
+       !memcmp(filename+(l-4),"\x2E\x77\x6F\x7A",4))) {           // .woz
+    mountWozFile(fullp);
+    getSDAddr=getSDAddrWoz;
+    getTrackBitStream=getWozTrackBitStream;
+    getTrackFromPh=getWozTrackFromPh;
+  }
+  return 1;
 }
 
 /* USER CODE END 0 */
@@ -579,6 +835,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_FATFS_Init();
   MX_TIM1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -609,52 +866,72 @@ int main(void)
     printf("Error mounting sdcard %d\n",fres);
   }
 
-  initFSScreen(currentFullPath);
-  displayFSItem();
+  
+  swithPage(FS,NULL);
 
   csize=fs.csize;
   database=fs.database;
  
-  //mountWozFile("BII.NIC");
-  mountWozFile("Zaxxon.woz");
-  
+  printf("Loading config file");
+  loadConfigFile();
 
-  //int filetype=1; // 1 for NIC 0 for WOZ
-/*
-  unsigned char sectorBuf0[6656];
- 
-  for (int i=0;i<13;i++){
-    int rSector=getSDAddrWoz(trk,i,csize, database);
-    cmd17GetDataBlock(rSector,sectorBuf0);
-    dumpBuf(sectorBuf0,i,512);
-  }
+  //setConfigFileDefaultValues();
+  saveConfigFile();
+
+  cleanJsonMem();
   
-*/
+  //mountWozFile("BII.NIC");
+  
+  mountImagefile("","F|DK.woz");
+  
   /*
-  unsigned char sectorBuf0[2048];
-  DWT->CYCCNT = 0;                                                                  // Reset cpu cycle counter
-  t1 = DWT->CYCCNT;
-  rSector=getSDAddrWoz(trk,0,csize, database);
-  cmd18GetDataBlocks(rSector,sectorBuf0,4);
-  t2 = DWT->CYCCNT;
-  dumpBuf(sectorBuf0,rSector,2048);
+  unsigned char sectorBuf0[8192];
+  unsigned char sectorBuf1[8192];
+  int rSector=0;
+  for (int i=1;i<14;i++){
+
   
+    DWT->CYCCNT = 0;                                                                  // Reset cpu cycle counter
+    t1 = DWT->CYCCNT;
+    rSector=getSDAddrWoz(trk,0,csize, database);
+    cmd18GetDataBlocks(rSector,sectorBuf0,i);
+
+    t2 = DWT->CYCCNT;
+    diff = t2 - t1;
+    printf("timelapse cmd18GetDatablock %ld cycles\n",diff);
+    DWT->CYCCNT = 0;                                                                  // Reset cpu cycle counter
+    t1 = DWT->CYCCNT;
+    cmd18GetDataBlocksBareMetal(rSector,sectorBuf1,i);
+    t2 = DWT->CYCCNT;
+    diff = t2 - t1;
+    printf("timelapse cmd18GetDatablockBareMetal %ld cycles\n",diff);
+
+    if (memcmp(sectorBuf0,sectorBuf1,i*512)){
+      printf("buf does not comp match\n");
+      dumpBuf(sectorBuf0,rSector,512);
+      dumpBuf(sectorBuf1,rSector,512);
+    }else{
+      printf("Good i:%d\n",i);
+    }
+  }
+  while(1);
+  */
+
+  //dumpBuf(sectorBuf0,rSector,2048);  
   //printf("computed rSector=%d\n",rSector[0]);
 
-  diff = t2 - t1;
-  printf("timelapse cmd18GetDatablock %ld cycles\n",diff);
-  */
   printf("Inside the twilight\n");
   fflush(stdout);
 
 
   memset(DMA_BIT_BUFFER,0,sizeof(char)*DMABlockSize);
-  
+  srand( time( NULL ) );
+    
   unsigned char woz_track_data_bloc[3*DMABlockSize]; 
   
   for (int i=0;i<3;i++){
     woz_sel_trk[i]=-1;
-    memset(woz_track_data_bloc[i],0,sizeof(char)*DMABlockSize);
+    memset(woz_track_data_bloc,0,sizeof(char)*3*DMABlockSize);
   }
 
   HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_RESET);
@@ -663,38 +940,30 @@ int main(void)
   TIM1->CCR1 = 64;                                                                  // Set the Duty Cycle 
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);                                // Start the PWN to for the Logic Analyzer to decode SPI with Pulse 250 Khz
   
-  for (int i=0;i<45;i++)                                                            // Used for Logic Analyzer and sync between SPI and Timer PWM
-    __NOP();                                                                          // Macro to NOP assembly code
-  //printf("OK1\n");
-  /**
-   * Init the buffer
-  */
+  for (int i=0;i<45;i++)                                                            // Used for Logic Analyzer and sync between SPI and Timer1 PWM
+    __NOP();                                                                        // Macro to NOP assembly code
+ 
   trk=0;
   woz_block_sel_012=0;
   
-  getWozTrackBitStream(0,woz_track_data_bloc);
+  getTrackBitStream(0,woz_track_data_bloc);
   woz_sel_trk[0]=0; 
-  //printf("OK2\n");
-  dumpBuf(woz_track_data_bloc+woz_block_sel_012*DMABlockSize,1,512);
-                                                                                    // change the trk in the selector
-  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc,DMABlockSize);       // copy the new track data to the DMA Buffer
+
+  //dumpBuf(woz_track_data_bloc+woz_block_sel_012*DMABlockSize,1,512);
+  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc,DMABlockSize);                      // copy the new track data to the DMA Buffer
         
   HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_BUFFER,DMABlockSize); 
 
   // Preload track 1
-  getWozTrackBitStream(1,woz_track_data_bloc+DMABlockSize);
+  getTrackBitStream(1,woz_track_data_bloc+DMABlockSize);
   woz_sel_trk[1]=1;
-  printf("track 1\n");
+  //printf("track 1\n");
   //dumpBuf(woz_track_data_bloc+1*DMABlockSize,1,512);
-  //memset(woz_track_data_bloc+1*DMABlockSize,0x55,6656); 
   
   // Preload track 2
-  getWozTrackBitStream(2,woz_track_data_bloc+2*DMABlockSize);
+  getTrackBitStream(2,woz_track_data_bloc+2*DMABlockSize);
   woz_sel_trk[2]=2; 
-  //printf("track 2\n");
-  //dumpBuf(woz_track_data_bloc+2*DMABlockSize,1,512);
-  
-     
+ 
   int f=0;
   while (1){
   
@@ -712,15 +981,27 @@ int main(void)
   
     if (/*!isDiskIIDisable() &&*/ trkChangeFlg==1 && mountedImageFile==1){                                                                  // Track has changed
       trkChangeFlg=0;                                                                // Important to change the flag at the top
-      trk=TMAP[ph_track]; 
-                                                                    
-      //trk=ph_track>>2;                                                             // current track <!> todo manage from TMAP
-      f=0;
+      trk=getTrackFromPh(ph_track);                                                  // get the trk according to the file WOZ|NIC
+      f=0;                                                                           // flag for main track data found withing the adjacent track
       unsigned int fp1=0,fm1=0;
       DWT->CYCCNT = 0;                                                               // Reset cpu cycle counter
       t1 = DWT->CYCCNT;
-      
+      prevTrk=trk;
       HAL_SPI_DMAPause(&hspi1);                                                       // Pause the current DMA
+      
+      if (trk==255){                                                                  // If Track is 255 then stuf it with random bit 
+        whiteNoise=1;                                                                 // Enable repeat random bit in the buffer with DMA half/cmplt buffer interrupt
+        for (int i=0;i<DMABlockSize;i++){
+          DMA_BIT_BUFFER[i]=rand();
+        }
+        HAL_SPI_DMAResume(&hspi1);
+        t2 = DWT->CYCCNT;
+        diff = t2 - t1;
+        printf("ph:%02d newTrak:%02d, prevTrak:%02d %ld cycles\n",ph_track,trk,prevTrk,diff);
+        continue;
+      }
+      whiteNoise=0;
+
       for (int i=0;i<3;i++){
         if (woz_sel_trk[i]==trk){
           f=1;
@@ -731,7 +1012,7 @@ int main(void)
 
       if (f!=1){
         woz_block_sel_012=1;
-        getWozTrackBitStream(trk,woz_track_data_bloc+woz_block_sel_012*DMABlockSize);
+        getTrackBitStream(trk,woz_track_data_bloc+woz_block_sel_012*DMABlockSize);
         woz_sel_trk[1]=trk;       
       }
 
@@ -741,39 +1022,52 @@ int main(void)
       t2 = DWT->CYCCNT;
       diff = t2 - t1;
 
-     // printf("newtrk:%02d prevtrk:%02d sel012 %02d woz_sel_trk:%02d-%02d-%02d\n",trk,prevTrk,woz_block_sel_012,woz_sel_trk[0],woz_sel_trk[1],woz_sel_trk[2]);
-   
-      DWT->CYCCNT = 0;                                                                 // Reset cpu cycle counter
+      DWT->CYCCNT = 0;                                                                            // Reset cpu cycle counter
       t1 = DWT->CYCCNT;
 
-      int selP1=(woz_block_sel_012+1)%3;                                               // selector number for the track above within 0,1,2
-      int selM1=(woz_block_sel_012-1)%3;                                               // selector number for the track below within 0,1,2
+      int selP1=(woz_block_sel_012+1)%3;                                                          // selector number for the track above within 0,1,2
+      int selM1=(woz_block_sel_012-1)%3;                                                          // selector number for the track below within 0,1,2
 
       if (woz_sel_trk[selP1]==(trk+1)){
         fp1=1;
       }
-      else if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                     // check if we need to load the track above                                                     
-        getWozTrackBitStream(trk+1,woz_track_data_bloc+selP1*DMABlockSize);     
-        woz_sel_trk[selP1]=(trk+1);                                                    // change the trk in the selector
+      else if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                           // check if we need to load the track above                                                     
+        getTrackBitStream(trk+1,woz_track_data_bloc+selP1*DMABlockSize);     
+        woz_sel_trk[selP1]=(trk+1);                                                               // change the trk in the selector
       }
 
       if (woz_sel_trk[selM1]==(trk-1)){
         fm1=1;
       }
-      else if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                      // check if we need to load the track above
-        getWozTrackBitStream(trk-1,woz_track_data_bloc+selM1*DMABlockSize);     
-        woz_sel_trk[selM1]=(trk-1);                                                    // change the trk in the selector
+      else if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                            // check if we need to load the track above
+        getTrackBitStream(trk-1,woz_track_data_bloc+selM1*DMABlockSize);     
+        woz_sel_trk[selM1]=(trk-1);                                                               // change the trk in the selector
       }
       t2 = DWT->CYCCNT;
       diff = t2 - t1;
       printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %02d %d-%d-%d %ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff);
     }
 
-    else if (updateFSFlag==1){
-      walkDir(currentFullPath);
-      initFSScreen("");
-      displayFSItem(); 
-      updateFSFlag=0;
+    else if (nextAction!=NONE){                                         // Several action can not be done on Interrupt
+      
+      switch(nextAction){
+        case FSDISP:
+          list_destroy(dirChainedList);
+          walkDir(currentFullPath);
+          currentClistPos=0;
+          initFSScreen("");
+          updateFSDisplay(1); 
+          nextAction=NONE;
+          break;
+        case IMG_MOUNT:
+          mountImagefile(currentFullPath,selItem);
+          swithPage(IMAGE,NULL);
+          nextAction=NONE;
+          break;
+        default:
+          break;
+      }
+      
     }
     
 
@@ -1016,6 +1310,64 @@ static void MX_TIM1_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 32000;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 200;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_OC_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_OC_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -1076,9 +1428,16 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pins : BTN_ENTR_Pin BTN_UP_Pin BTN_DOWN_Pin */
+  GPIO_InitStruct.Pin = BTN_ENTR_Pin|BTN_UP_Pin|BTN_DOWN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : STEP0_Pin STEP1_Pin STEP2_Pin STEP3_Pin */
   GPIO_InitStruct.Pin = STEP0_Pin|STEP1_Pin|STEP2_Pin|STEP3_Pin;
@@ -1086,11 +1445,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BTN_DOWN_Pin BTN_UP_Pin BTN_ENTR_Pin BTN_RET_Pin */
-  GPIO_InitStruct.Pin = BTN_DOWN_Pin|BTN_UP_Pin|BTN_ENTR_Pin|BTN_RET_Pin;
+  /*Configure GPIO pin : BTN_RET_Pin */
+  GPIO_InitStruct.Pin = BTN_RET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(BTN_RET_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : DEVICE_ENABLE_Pin */
   GPIO_InitStruct.Pin = DEVICE_ENABLE_Pin;
@@ -1127,19 +1486,24 @@ static void MX_GPIO_Init(void)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
-  //printf("startr here 0\n");
-  if(GPIO_Pin == GPIO_PIN_0  ||           // Step 0 PB8
-     GPIO_Pin == GPIO_PIN_1  ||           // Step 1 PB9
-     GPIO_Pin == GPIO_PIN_2 ||           // Step 2 PB10
-     GPIO_Pin == GPIO_PIN_3  ) {         // Step 3 PB11
+  //printf("startr here 0 %d\n",GPIO_Pin);
+  if(GPIO_Pin == GPIO_PIN_0   ||               // Step 0 PB8
+      GPIO_Pin == GPIO_PIN_1  ||              // Step 1 PB9
+      GPIO_Pin == GPIO_PIN_2  ||              // Step 2 PB10
+      GPIO_Pin == GPIO_PIN_3  
+     ) {            // Step 3 PB11
     processDiskHeadMove(GPIO_Pin);
    
-  }else if (GPIO_Pin == GPIO_PIN_4 ||     // BTN_RETURN
-            GPIO_Pin == GPIO_PIN_5 ||     // BTN_ENTER
-            GPIO_Pin == GPIO_PIN_6 ||     // BTN_DWN
-            GPIO_Pin == GPIO_PIN_7        // BTN_UP
-            ){
+  }else if ((GPIO_Pin == BTN_RET_Pin  ||      // BTN_RETURN
+            GPIO_Pin == BTN_ENTR_Pin  ||      // BTN_ENTER
+            GPIO_Pin == BTN_UP_Pin    ||      // BTN_UP
+            GPIO_Pin == BTN_DOWN_Pin          // BTN_DOWN
+            )&& buttonDebounceState==true){
+           
+    buttonDebounceState=false;
+    HAL_TIM_Base_Start_IT(&htim2);
     processBtnInterrupt(GPIO_Pin);
+
             }
   
   

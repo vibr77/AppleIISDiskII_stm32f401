@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "list.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -60,9 +60,10 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 
+enum page{FS,MOUNT,MENU,IMAGE};
+enum action{NONE,IMG_MOUNT,FSDISP};
+
 void dumpBuf(unsigned char * buf,long memoryAddr,int len);
-
-
 
 int  isDiskIIDisable();
 void processBtnInterrupt(uint16_t GPIO_Pin);
@@ -74,24 +75,38 @@ void dumpBuf(unsigned char * buf,long memoryAddr,int len);
 void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi);
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi);
 
-
-long getSDAddr(int trk,int sector,int csize, long database);
+int mountImagefile(char * path,char * filename);
+long getSDAddrNic(int trk,int sector,int csize, long database);
 long getSDAddrWoz(int trk,int block,int csize, long database);
+
+int getWozTrackFromPh(int phtrack);
+int getNicTrackFromPh(int phtrack);
 
 int isDiskIIDisable();
 
+list_t * sortLinkedList(list_t * plst);
 
 void processPrevFSItem();
 void processNextFSItem();
 void processSelectFSItem();
+void swithPage(enum page newPage,void * arg);
 
 void cmd17GetDataBlock(long memoryAdr,unsigned char *buffer);
 void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count);
 
-void getWozTrackBitStream(int trk,char * buffer);
+int  getWozTrackBitStream(int trk,unsigned char * buffer);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define BTN_ENTR_Pin GPIO_PIN_13
+#define BTN_ENTR_GPIO_Port GPIOC
+#define BTN_ENTR_EXTI_IRQn EXTI15_10_IRQn
+#define BTN_UP_Pin GPIO_PIN_14
+#define BTN_UP_GPIO_Port GPIOC
+#define BTN_UP_EXTI_IRQn EXTI15_10_IRQn
+#define BTN_DOWN_Pin GPIO_PIN_15
+#define BTN_DOWN_GPIO_Port GPIOC
+#define BTN_DOWN_EXTI_IRQn EXTI15_10_IRQn
 #define STEP0_Pin GPIO_PIN_0
 #define STEP0_GPIO_Port GPIOB
 #define STEP0_EXTI_IRQn EXTI0_IRQn
@@ -101,17 +116,8 @@ void getWozTrackBitStream(int trk,char * buffer);
 #define STEP2_Pin GPIO_PIN_2
 #define STEP2_GPIO_Port GPIOB
 #define STEP2_EXTI_IRQn EXTI2_IRQn
-#define BTN_DOWN_Pin GPIO_PIN_11
-#define BTN_DOWN_GPIO_Port GPIOA
-#define BTN_DOWN_EXTI_IRQn EXTI15_10_IRQn
-#define BTN_UP_Pin GPIO_PIN_12
-#define BTN_UP_GPIO_Port GPIOA
-#define BTN_UP_EXTI_IRQn EXTI15_10_IRQn
-#define BTN_ENTR_Pin GPIO_PIN_13
-#define BTN_ENTR_GPIO_Port GPIOA
-#define BTN_ENTR_EXTI_IRQn EXTI15_10_IRQn
-#define BTN_RET_Pin GPIO_PIN_14
-#define BTN_RET_GPIO_Port GPIOA
+#define BTN_RET_Pin GPIO_PIN_10
+#define BTN_RET_GPIO_Port GPIOB
 #define BTN_RET_EXTI_IRQn EXTI15_10_IRQn
 #define STEP3_Pin GPIO_PIN_3
 #define STEP3_GPIO_Port GPIOB
