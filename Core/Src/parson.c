@@ -220,7 +220,7 @@ static int write_file(const char * filename,char * buffer){
         printf("Error openning file %s for writing\n",filename);
         return -1;
     }
-    int ptr;
+    unsigned int ptr;
     
     int l=strlen(buffer);
     
@@ -1852,14 +1852,14 @@ JSON_Status json_serialize_to_buffer(const JSON_Value *value, char *buf, size_t 
 
 JSON_Status json_serialize_to_file(const JSON_Value *value, const char *filename) {
     JSON_Status return_code = JSONSuccess;
-    FILE *fp = NULL;
+    //FILE *fp = NULL;
     char *serialized_string = json_serialize_to_string(value);
     if (serialized_string == NULL) {
         return JSONFailure;
     }
     
     write_file(filename,serialized_string);
-    printf("do here \n");
+    //printf("do here \n");
     /*fp = fopen(filename, "w");
     if (fp == NULL) {
         json_free_serialized_string(serialized_string);

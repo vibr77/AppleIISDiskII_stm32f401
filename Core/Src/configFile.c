@@ -14,9 +14,7 @@ JSON_Object *configParams;
 
 void loadConfigFile(){
 
-    
     root_value = json_parse_file(configFilename);
-
     configParams = json_value_get_object(root_value);
 
     for (size_t j=0;j<json_object_get_count(configParams);j++){

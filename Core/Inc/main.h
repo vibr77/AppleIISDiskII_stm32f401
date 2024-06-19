@@ -32,6 +32,7 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "list.h"
+#include "defines.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -59,42 +60,46 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
 enum page{FS,MOUNT,MENU,IMAGE};
 enum action{NONE,IMG_MOUNT,FSDISP};
+enum STATUS{RET_OK,RET_ERR};
 
+void EnableTiming(void);
 void dumpBuf(unsigned char * buf,long memoryAddr,int len);
+char *byte_to_binary(int x);
 
-int  isDiskIIDisable();
-void processBtnInterrupt(uint16_t GPIO_Pin);
-void processDiskHeadMove(uint16_t GPIO_Pin);
+enum STATUS cmd17GetDataBlockBareMetal(long memoryAdr,unsigned char *buffer);
+enum STATUS cmd18GetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,int count);
 
-void dumpBuf(unsigned char * buf,long memoryAddr,int len);
+// HAL Interrupt function
 
+void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi);           // DMA SPI Half buffer completion
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi);               // DMA SPI Full buffer completion
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);        // Debouncing button timer interrupt
 
-void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi);
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi);
+list_t * sortLinkedList(list_t * plst);                             // Sort the chainedList
+enum STATUS walkDir(char * path);                                   // Build chainedList of Directories/Files Items
 
-int mountImagefile(char * path,char * filename);
-long getSDAddrNic(int trk,int sector,int csize, long database);
-long getSDAddrWoz(int trk,int block,int csize, long database);
-
-int getWozTrackFromPh(int phtrack);
-int getNicTrackFromPh(int phtrack);
+enum STATUS mountImagefile(char * filename);
 
 int isDiskIIDisable();
-
-list_t * sortLinkedList(list_t * plst);
+void processBtnInterrupt(uint16_t GPIO_Pin);
 
 void processPrevFSItem();
 void processNextFSItem();
 void processSelectFSItem();
-void swithPage(enum page newPage,void * arg);
 
-void cmd17GetDataBlock(long memoryAdr,unsigned char *buffer);
-void cmd18GetDataBlocks(long memoryAdr,unsigned char * buffer,int count);
+void processToogleOption();
+void processMountOption();
+void nothing();
+void processBtnRet();
 
-int  getWozTrackBitStream(int trk,unsigned char * buffer);
+enum STATUS swithPage(enum page newPage,void * arg);
+void processDiskHeadMove(uint16_t GPIO_Pin);
+
+enum STATUS mountImagefile(char * filename);
+enum STATUS initeDMABuffering();
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
