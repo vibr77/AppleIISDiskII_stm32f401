@@ -76,8 +76,6 @@
 #define _USE_FORWARD         0
 /* This option switches f_forward() function. (0:Disable or 1:Enable) */
 
-
-#define _USE_WRITE         1
 /*-----------------------------------------------------------------------------/
 / Locale and Namespace Configurations
 /-----------------------------------------------------------------------------*/

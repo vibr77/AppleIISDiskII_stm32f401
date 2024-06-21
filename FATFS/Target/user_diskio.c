@@ -133,8 +133,6 @@ DRESULT USER_read (
   * @param  count: Number of sectors to write (1..128)
   * @retval DRESULT: Operation result
   */
-
-
 #if _USE_WRITE == 1
 DRESULT USER_write (
 	BYTE pdrv,          /* Physical drive nmuber to identify the drive */
