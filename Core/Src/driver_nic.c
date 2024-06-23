@@ -42,7 +42,7 @@ enum STATUS getNicTrackBitStream(int trk,unsigned  char* buffer){
   cmd18GetDataBlocksBareMetal(addr,tmp2,16);
 
   for (int i=0;i<16;i++){
-    memcpy(buffer+i*412,tmp2+i*512,412);
+    memcpy(buffer+i*408,tmp2+i*512,408);
   }
   free(tmp2);
   return RET_OK;

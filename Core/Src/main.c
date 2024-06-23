@@ -21,6 +21,44 @@ Lessons learne:
 Current status: READ PARTIALLY WORKING / WRITE NOT YET
 + woz file support : in progress first images are working
 + NIC file support : in progress first images are working
+
+Architecture:
+- TIM1 Timer 1 is used generate a PWM for the logic analyzer to decode NIB (will be removed once stabilized)
+- TIM2 Timer 2 is used to debounce sw button
+- TIM3 Timer 3 is used for clock SP1 (RDData output Apple II)
+- TIM4 Timer 4 is used for clock the counter on the WRDDATA side
+
+- SPI1 is slave DMA transmit only (RDDATA)
+- SPI2 is master full duplex to read / write SDCARD
+- SPI3 is slave DMA receive only (WRDATA)
+
+GPIO
+BTN
+- PC13 BTN_ENTR
+- PC14 BTN_UP
+- PC15 BTN_DOWN
+- PB10 BTN_RET
+
+STEP
+- PA0 STEP0
+- PA1 STEP1
+- PA2 STEP2
+- PA3 STEP3
+SPI: 
+- PA5 SPI1_SCK
+- PA6 SPI1_MISO
+- PB3 SPI3_SCK
+- PB5 SPI3_MOSI
+- PB12 SPI2_NSS
+- PB13 SPI2_SCK
+- PB14 SP2_MISO
+- PB15 SP2_MOSI
+
+- PA11 WR_REQ
+- PA12 WR_PROTECT
+- PA4 DEVICE_ENABLE
+- PA7 SD_EJECT 
+
 */ 
 
 /* USER CODE END Header */
@@ -108,10 +146,11 @@ volatile int ph_track=0;                                    // SDISK Physical tr
 volatile int intTrk=0;                                      // InterruptTrk                                    
 unsigned char prevTrk=0;                                    // prevTrk to keep track of the last head track
 
-const unsigned int DMABlockSize=6656;//6592; // 6656        // Size of the DMA Buffer => full track width with 13 block of 512
-unsigned char woz_track_data_bloc[19968];                   // 3 adjacent track of 13 bloc of 512
+unsigned int DMABlockSize=6656;//6592; // 6656        // Size of the DMA Buffer => full track width with 13 block of 512
+unsigned char read_track_data_bloc[19968];                   // 3 adjacent track of 13 bloc of 512
   
-unsigned char DMA_BIT_BUFFER[8192];                         // DMA Buffer from the SPI
+unsigned char DMA_BIT_TX_BUFFER[8192];                         // DMA Buffer from the SPI
+unsigned char DMA_BIT_RX_BUFFER[6656];                         // DMA Buffer from the SPI
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
 
@@ -228,7 +267,7 @@ void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi){
   
   if (flgwhiteNoise==1){                                // Enable non repeatable white noise on the first half track
     for (int i=0;i<DMABlockSize/2;i++){
-          DMA_BIT_BUFFER[i]=rand();
+          DMA_BIT_TX_BUFFER[i]=rand();
     }
   }
   return;
@@ -238,11 +277,19 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
 
   if (flgwhiteNoise==1){                                // Enable non repeatable white noise on the second half track
     for (int i=DMABlockSize/2;i<DMABlockSize;i++){   
-          DMA_BIT_BUFFER[i]=rand();
+          DMA_BIT_TX_BUFFER[i]=rand();
     }
   }
   return;
 }
+
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
+{
+    HAL_SPI_Receive_DMA(&hspi1, DMA_BIT_RX_BUFFER, DMABlockSize);
+    //HAL_UART_Transmit_IT(&huart1, RX_Buffer, );
+    dumpBuf(DMA_BIT_RX_BUFFER,1,1024);
+}
+
 
 /**
   * @brief sort a new chainedlist of item alphabetically
@@ -453,7 +500,7 @@ void processNextFSItem(){
 
 void processSelectFSItem(){
 
-  if (nextAction=FSDISP)
+  if (nextAction==FSDISP)
     return;
 
   list_node_t *pItem=NULL;
@@ -601,8 +648,8 @@ const int position2Direction[8][8] = {               // position2Direction[X][Y]
 
 void processDiskHeadMove(uint16_t GPIO_Pin){
 
-  if (isDiskIIDisable())
-    return;
+  //if (isDiskIIDisable())
+  //  return;
   
   unsigned char stp=(GPIOA->IDR&0b0000000000001111);
 
@@ -621,7 +668,7 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
       ph_track=160;                                             
                                                       
     intTrk=getTrackFromPh(ph_track);
-
+  
     // Only for debugging to be removed
     if (k1<1024){
       dbg_move[k1]=move;
@@ -675,15 +722,17 @@ enum STATUS mountImagefile(char * filename){
   if (l>4 && 
       (!memcmp(filename+(l-4),"\x2E\x4E\x49\x43",4)  ||           // .NIC
        !memcmp(filename+(l-4),"\x2E\x6E\x69\x63",4))){            // .nic
+     DMABlockSize=16*408;
      if (mountNicFile(filename)!=RET_OK)
         return RET_ERR;
-
+    
      getSDAddr=getSDAddrNic;
      getTrackBitStream=getNicTrackBitStream;
      getTrackFromPh=getNicTrackFromPh;
   }else if (l>4 && 
       (!memcmp(filename+(l-4),"\x2E\x57\x4F\x5A",4)  ||           // .WOZ
        !memcmp(filename+(l-4),"\x2E\x77\x6F\x7A",4))) {           // .woz
+    DMABlockSize=13*512;
     if (mountWozFile(filename)!=RET_OK)
       return RET_ERR;
 
@@ -694,6 +743,7 @@ enum STATUS mountImagefile(char * filename){
   }else{
     return RET_ERR;
   }
+  printf("Mount OK\n");
   fldImageMounted=1;
   return RET_OK;
 }
@@ -706,27 +756,29 @@ enum STATUS initeDMABuffering(){
   HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);   
   HAL_SPI_DMAStop(&hspi1); 
   flgBeaming=0;
-  memset(DMA_BIT_BUFFER,0,sizeof(char)*DMABlockSize);
-  memset(woz_track_data_bloc,0,sizeof(char)*3*DMABlockSize);
+  memset(DMA_BIT_TX_BUFFER,0,sizeof(char)*DMABlockSize);
+  memset(DMA_BIT_TX_BUFFER,0,sizeof(char)*8192);
+  memset(DMA_BIT_RX_BUFFER,0,sizeof(char)*DMABlockSize);
+  memset(read_track_data_bloc,0,sizeof(char)*3*DMABlockSize);
 
   for (int i=0;i<3;i++){
     woz_sel_trk[i]=-1;
   }
   
   woz_block_sel_012=0;
-  getTrackBitStream(0,woz_track_data_bloc);
+  getTrackBitStream(0,read_track_data_bloc);
   woz_sel_trk[0]=0; 
       
-  getTrackBitStream(1,woz_track_data_bloc+DMABlockSize);
+  getTrackBitStream(1,read_track_data_bloc+DMABlockSize);
   woz_sel_trk[1]=1;
 
-  getTrackBitStream(2,woz_track_data_bloc+2*DMABlockSize);
+  getTrackBitStream(2,read_track_data_bloc+2*DMABlockSize);
   woz_sel_trk[2]=2; 
  
   printf("start PrevTrk=%d; intTrk=%d\n",prevTrk,intTrk);
 
-  HAL_GPIO_WritePin(GPIOA,GPIO_PIN_7,GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA,GPIO_PIN_8,GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(WR_PROTECT_GPIO_Port,WR_PROTECT_Pin,GPIO_PIN_RESET);      // WRITE_PROTECT is disable
+
 
   TIM1->CCR1 = 64;                                                                  // Set the Duty Cycle 
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);                                // Start the PWN to for the Logic Analyzer to decode SPI with Pulse 250 Khz
@@ -734,9 +786,15 @@ enum STATUS initeDMABuffering(){
   for (int i=0;i<45;i++)                                                            // Used for Logic Analyzer and sync between SPI and Timer1 PWM
     __NOP();                                                                        // Macro to NOP assembly code
 
-  memcpy(DMA_BIT_BUFFER,woz_track_data_bloc,DMABlockSize); 
-  HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_BUFFER,DMABlockSize);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);   
+  memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc,DMABlockSize); 
+  HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,DMABlockSize);
+  //HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,8192);
+  
+  HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,DMABlockSize);
+  
+  //printf("here\n");
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); 
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);   
   
   flgBeaming=1;
   return RET_OK; 
@@ -791,9 +849,12 @@ int main(void)
   uint8_t Test[] = "\n\n************** BOOTING ****************\r\n";                        // Data to send
 
   HAL_UART_Transmit(&huart1,Test,sizeof(Test),10);             // Sending in normal mode
-  HAL_Delay(1000);
-  srand( time( NULL ) );
   
+  //HAL_Delay(1000);
+ 
+  srand( time( NULL ) );
+  printf("this is the sound of sea\n");
+  printf("\n\n\n");
   EnableTiming();                                                                   // Enable WatchDog to get precise CPU Cycle counting
   initScreen();                                                                     // I2C Screen init
 
@@ -801,7 +862,8 @@ int main(void)
   currentClistPos=0;                                                                // Current index in the chained List
   lastlistPos=0;                                                                    // Last index in the chained list
 
-  int trk=0; 
+  int trk=0;
+  prevTrk=35; 
                                                                      
   unsigned long t1,t2,diff1,diff2;
   currentFullPath[0]=0x0;                                                            // Root is ""
@@ -815,32 +877,38 @@ int main(void)
 
   csize=fs.csize;
   database=fs.database;
- 
-  printf("Loading config file");
-  loadConfigFile();
   
-  char *imgFile=(char*)getConfigParamStr(configParams,"lastImageFile");
-  if (imgFile!=NULL){
-    mountImagefile(imgFile);
+  printf("Loading config file");
+  //loadConfigFile();
+  
+  //char *imgFile=(char*)getConfigParamStr(configParams,"lastImageFile");
+  //if (imgFile!=NULL){
+  //  mountImagefile(imgFile);
+  //  initeDMABuffering();
+  //  swithPage(IMAGE,NULL);
+  //}else{
+    
+    if (mountImagefile("Locksmithcrk.nic")!=RET_OK){
+      printf("Mount Image Error\n");
+    }
+    
     initeDMABuffering();
-    swithPage(IMAGE,NULL);
-  }else{
-    //mountImagefile("Snake.NIC");
+    
     swithPage(FS,NULL);
-  }
+  //}
 
   printf("Inside the twilight\n");
   fflush(stdout);
-
+  //dumpBuf(DMA_BIT_TX_BUFFER,1,512);
  
     
-
   // Todo :
   // Add DeviceEnable to Interrupt
   // Init buffer on mount image change
   // Config based last image mount
   
   unsigned int f=0,fp1=0,fm1=0;
+  int kk=0;
   while (1){
       
     /*
@@ -852,8 +920,18 @@ int main(void)
       }
     }
     */
-
-    if (!isDiskIIDisable() && prevTrk!=intTrk && fldImageMounted==1){  
+  // continue;
+    
+    /*if (kk==99){
+      kk=0;
+      printf("Looping enable=%d prevTrk:%d!=intTrk:%d flg:%d\n",isDiskIIDisable(),prevTrk,intTrk,fldImageMounted);
+    }
+    kk++;
+   */
+    /*if (isDiskIIDisable()==1){
+      printf("here\n");
+    }*/
+    if (/*isDiskIIDisable()==0 && */prevTrk!=intTrk && fldImageMounted==1){  
       trk=intTrk;                                                                    // Track has changed, but avoid new change during the process
       f=0;                                                                           // flag for main track data found withing the adjacent track
       
@@ -863,7 +941,7 @@ int main(void)
       
       if (trk==255){    
         for (int i=0;i<DMABlockSize;i++){
-          DMA_BIT_BUFFER[i]=rand();
+          DMA_BIT_TX_BUFFER[i]=rand();
         }                                                                            // If Track is 255 then stuf it with random bit                                                                             
         
         HAL_SPI_DMAResume(&hspi1);
@@ -886,13 +964,14 @@ int main(void)
 
       if (f!=1){
         woz_block_sel_012=1;
-        getTrackBitStream(trk,woz_track_data_bloc+woz_block_sel_012*DMABlockSize);
-        woz_sel_trk[1]=trk;    
+        getTrackBitStream(trk,read_track_data_bloc+woz_block_sel_012*DMABlockSize);
+        woz_sel_trk[1]=trk;
+          
       }
 
-      memcpy(DMA_BIT_BUFFER,woz_track_data_bloc+woz_block_sel_012*DMABlockSize,DMABlockSize);      // copy the new track data to the DMA Buffer
+      memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc+woz_block_sel_012*DMABlockSize,DMABlockSize);      // copy the new track data to the DMA Buffer
       HAL_SPI_DMAResume(&hspi1); 
-      
+      //dumpBuf(DMA_BIT_TX_BUFFER,666,512);
       t2 = DWT->CYCCNT;
       diff1 = t2 - t1;
 
@@ -908,7 +987,7 @@ int main(void)
         fp1=1;
       }
       else if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                           // check if we need to load the track above                                                     
-        getTrackBitStream(trk+1,woz_track_data_bloc+selP1*DMABlockSize);     
+        getTrackBitStream(trk+1,read_track_data_bloc+selP1*DMABlockSize);     
         woz_sel_trk[selP1]=(trk+1);                                                               // change the trk in the selector
       }
 
@@ -916,13 +995,15 @@ int main(void)
         fm1=1;
       }
       else if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                            // check if we need to load the track above
-        getTrackBitStream(trk-1,woz_track_data_bloc+selM1*DMABlockSize);     
+        getTrackBitStream(trk-1,read_track_data_bloc+selM1*DMABlockSize);     
         woz_sel_trk[selM1]=(trk-1);                                                               // change the trk in the selector
       }
       t2 = DWT->CYCCNT;
       diff2 = t2 - t1;
       printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %d %d-%d-%d d1:%ld d2:%ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff1,diff2);
       prevTrk=trk;
+    }else if (fldImageMounted==0){
+      printf("Fuck\n");
     }
 
     else if (nextAction!=NONE){                                         // Several action can not be done on Interrupt
@@ -1206,7 +1287,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 128;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -1316,7 +1397,7 @@ static void MX_TIM3_Init(void)
   htim3.Init.Period = 255;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_OC_Init(&htim3) != HAL_OK)
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1326,11 +1407,11 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 128;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_OC_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1365,7 +1446,7 @@ static void MX_TIM4_Init(void)
   htim4.Init.Period = 31;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-  if (HAL_TIM_OC_Init(&htim4) != HAL_OK)
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1375,11 +1456,11 @@ static void MX_TIM4_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 16;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_OC_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -1465,25 +1546,23 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : STEP0_Pin STEP1_Pin STEP2_Pin STEP3_Pin
-                           WR_REQ_Pin */
-  GPIO_InitStruct.Pin = STEP0_Pin|STEP1_Pin|STEP2_Pin|STEP3_Pin
-                          |WR_REQ_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  /*Configure GPIO pins : STEP0_Pin STEP1_Pin STEP2_Pin STEP3_Pin */
+  GPIO_InitStruct.Pin = STEP0_Pin|STEP1_Pin|STEP2_Pin|STEP3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : DEVICE_ENABLE_Pin */
   GPIO_InitStruct.Pin = DEVICE_ENABLE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(DEVICE_ENABLE_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : BTN_RET_Pin */
-  GPIO_InitStruct.Pin = BTN_RET_Pin;
+  /*Configure GPIO pin : SD_EJECT_Pin */
+  GPIO_InitStruct.Pin = SD_EJECT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(BTN_RET_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(SD_EJECT_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : WR_PROTECT_Pin */
   GPIO_InitStruct.Pin = WR_PROTECT_Pin;
@@ -1492,7 +1571,34 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(WR_PROTECT_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : BTN_RET_Pin */
+  GPIO_InitStruct.Pin = BTN_RET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(BTN_RET_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : WR_REQ_Pin */
+  GPIO_InitStruct.Pin = WR_REQ_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(WR_REQ_GPIO_Port, &GPIO_InitStruct);
+
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
@@ -1510,11 +1616,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
   //printf("startr here 0 %d\n",GPIO_Pin);
-  if(GPIO_Pin == GPIO_PIN_0   ||               // Step 0 PB8
-      GPIO_Pin == GPIO_PIN_1  ||              // Step 1 PB9
-      GPIO_Pin == GPIO_PIN_2  ||              // Step 2 PB10
-      GPIO_Pin == GPIO_PIN_3  
+  if( GPIO_Pin == STEP0_Pin   ||               // Step 0 PB8
+      GPIO_Pin == STEP1_Pin   ||               // Step 1 PB9
+      GPIO_Pin == STEP2_Pin   ||               // Step 2 PB10
+      GPIO_Pin == STEP3_Pin 
      ) {            // Step 3 PB11
+    
     processDiskHeadMove(GPIO_Pin);
    
   }else if ((GPIO_Pin == BTN_RET_Pin  ||      // BTN_RETURN
@@ -1527,7 +1634,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     HAL_TIM_Base_Start_IT(&htim2);
     processBtnInterrupt(GPIO_Pin);
 
-            }
+  } else if (GPIO_Pin == WR_REQ_Pin){
+    printf("WR_REQ\n");
+  }
   
   
    else {

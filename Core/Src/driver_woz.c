@@ -149,7 +149,7 @@ enum STATUS mountWozFile(char * filename){
         f_lseek(&fil,248);
         f_read(&fil,trk_chunk,1280,&pt);
 
-        if (!memcmp(trk_chunk,"\x54\x52\x4B\x53",4)){          // 0x534B5254          
+        if (!memcmp(trk_chunk,"\x54\x52\x4B\x53",4)){          // 0x534B5254          // ERREUR A FIXER ICI
 
             for (int i=0;i<160;i++){
                 BLK_startingBlocOffset[i]=(((unsigned short)trk_chunk[i*8+8+1] << 8) & 0xF00) | trk_chunk[i*8+8];
