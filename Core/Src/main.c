@@ -106,6 +106,7 @@ SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
 SPI_HandleTypeDef hspi3;
 DMA_HandleTypeDef hdma_spi1_tx;
+DMA_HandleTypeDef hdma_spi3_rx;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
@@ -285,9 +286,9 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 {
-    HAL_SPI_Receive_DMA(&hspi1, DMA_BIT_RX_BUFFER, DMABlockSize);
+    //HAL_SPI_Receive_DMA(&hspi3, DMA_BIT_RX_BUFFER, DMABlockSize);
     //HAL_UART_Transmit_IT(&huart1, RX_Buffer, );
-    dumpBuf(DMA_BIT_RX_BUFFER,1,1024);
+    //dumpBuf(DMA_BIT_RX_BUFFER,1,256);
 }
 
 
@@ -790,7 +791,7 @@ enum STATUS initeDMABuffering(){
   HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,DMABlockSize);
   //HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,8192);
   
-  HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,DMABlockSize);
+  HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,1024);
   
   //printf("here\n");
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); 
@@ -1512,8 +1513,12 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
@@ -1635,7 +1640,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     processBtnInterrupt(GPIO_Pin);
 
   } else if (GPIO_Pin == WR_REQ_Pin){
-    printf("WR_REQ\n");
+    
+    long pos=&hspi3.hdmarx->StreamBaseAddress;
+    long pos2=&hspi3.hdmarx->StreamIndex;
+    printf("WR_REQ %ld %ld\n",pos,pos2);
+    dumpBuf(DMA_BIT_RX_BUFFER,1,256);
+    memset(DMA_BIT_RX_BUFFER,0,1024);
   }
   
   
