@@ -77,6 +77,11 @@ void HAL_SPI_TxHalfCpltCallback(SPI_HandleTypeDef *hspi);           // DMA SPI H
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi);               // DMA SPI Full buffer completion
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);        // Debouncing button timer interrupt
 
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi);
+void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef * hspi);
+void computeCircularAddr(int half);
+void processCircularBufferCopy(unsigned int src_s,unsigned int src_e,unsigned int dst_s,unsigned int dst_e,unsigned int blocksize,unsigned int copylen);
+
 list_t * sortLinkedList(list_t * plst);                             // Sort the chainedList
 enum STATUS walkDir(char * path);                                   // Build chainedList of Directories/Files Items
 

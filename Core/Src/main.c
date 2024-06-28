@@ -155,6 +155,7 @@ unsigned char DMA_BIT_RX_BUFFER[6656];                         // DMA Buffer fro
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
 
+unsigned int WR_REQ_PHASE=0;
                               
 long database=0;                                            // start of the data segment in FAT
 int csize=0;                                                // Cluster size
@@ -174,6 +175,14 @@ void (*ptrbtnUp)(void *);                                   // function pointer 
 void (*ptrbtnDown)(void *);
 void (*ptrbtnEntr)(void *);
 void (*ptrbtnRet)(void *);
+
+volatile uint16_t rx_start_indx;
+volatile uint16_t rx_end_indx;
+volatile uint16_t tx_start_indx;
+volatile uint16_t tx_end_indx;
+volatile int tx_rx_indx_gap;
+
+char dbgWriteBuffer[2560];                             // 35*512 aim to store the write buffer first 512 bytes per track 
 
 extern JSON_Object *configParams;
 
@@ -195,6 +204,37 @@ void EnableTiming(void){
   *DWT_LAR = 0xC5ACCE55;            // enable access
   *DWT_CYCCNT = 0;                  // reset the counter
   *DWT_CONTROL |= 1 ;               // enable the counter
+}
+
+void dumpBufFile(char * filename,char * buffer,int length){
+
+  FATFS FatFs; 	//Fatfs handle
+  FIL fil; 		//File handle
+  FRESULT fres; //Result after operations
+
+  fres = f_mount(&FatFs, "", 1); //1=mount now
+  if (fres != FR_OK) {
+	  printf("f_mount error (%i)\r\n", fres);
+	  while(1);
+  }
+  
+  fres = f_open(&fil, filename, FA_WRITE | FA_OPEN_ALWAYS | FA_CREATE_ALWAYS);
+  
+  if(fres == FR_OK) {
+    printf("open for write ok");
+	} else {
+	  printf("f_open error (%i)\r\n", fres);
+  }
+
+  UINT bytesWrote;
+  fres = f_write(&fil, buffer, length, &bytesWrote);
+  if(fres == FR_OK) {
+	  printf("Wrote %i bytes to 'write.txt'!\r\n", bytesWrote);
+  } else {
+	  printf("f_write error (%i)\r\n");
+  }
+
+  f_close(&fil);
 }
 
 void dumpBuf(unsigned char * buf,long memoryAddr,int len){
@@ -284,13 +324,250 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
   return;
 }
 
-void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
-{
-    //HAL_SPI_Receive_DMA(&hspi3, DMA_BIT_RX_BUFFER, DMABlockSize);
-    //HAL_UART_Transmit_IT(&huart1, RX_Buffer, );
-    //dumpBuf(DMA_BIT_RX_BUFFER,1,256);
+unsigned int memcp_indx=0;
+unsigned int memcp_sub_indx[10];
+unsigned int memcp_op_src_s[10];
+unsigned int memcp_op_src_e[10];
+unsigned int memcp_op_dst_s[10];
+unsigned int memcp_op_dst_e[10];
+unsigned int memcp_op_len[10];
+unsigned int memcp_half[10];
+unsigned int total_byte_written=0;
+
+unsigned int memcp_op_sub_src_s[10][10];
+unsigned int memcp_op_sub_src_e[10][10];
+unsigned int memcp_op_sub_dst_s[10][10];
+unsigned int memcp_op_sub_dst_e[10][10];
+unsigned int memcp_op_sub_len[10][10];
+unsigned char memcp_op_sub_type[10][10];
+
+
+
+void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef * hspi){
+  
+   if (WR_REQ_PHASE==1){
+        // Copy the first half of the buffer to 
+    computeCircularAddr(0);
+    memcp_half[memcp_indx]=0;
+    rx_start_indx=(DMABlockSize/2)-1;
+    memcp_indx++;
+  } 
 }
 
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
+{
+  if (WR_REQ_PHASE==1){
+        // Copy the first half of the buffer to 
+    computeCircularAddr(1);
+    memcp_half[memcp_indx]=1;
+    rx_start_indx=0;
+    memcp_indx++;
+  }  
+}
+
+
+/**
+ * 
+ * 
+ * 
+ */
+
+void computeCircularAddr(int half){
+
+  int offset=(DMABlockSize/2)*half;
+  if (memcp_indx==0 && rx_start_indx>=(DMABlockSize/2)*half  && rx_start_indx<(DMABlockSize/2)*(half+1)){
+        memcp_op_src_s[memcp_indx]=rx_start_indx;
+        memcp_op_src_e[memcp_indx]=(DMABlockSize/2-1)+offset;
+        memcp_op_len[memcp_indx]=memcp_op_src_e[memcp_indx]-memcp_op_src_s[memcp_indx];
+        
+        if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
+          memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
+        }else{
+          memcp_op_dst_s[memcp_indx]=(DMABlockSize/2)+tx_rx_indx_gap;
+        }
+
+        memcp_op_dst_e[memcp_indx]=(DMABlockSize/2-1)+offset+tx_rx_indx_gap;
+        processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
+        total_byte_written+=memcp_op_len[memcp_indx];
+    
+    }else if(memcp_indx!=0){
+      // copy the full first half
+      memcp_op_src_s[memcp_indx]=offset;
+      memcp_op_src_e[memcp_indx]=(DMABlockSize/2-1)+offset;
+
+      if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
+        memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
+      }else{
+        memcp_op_dst_s[memcp_indx]=DMABlockSize+tx_rx_indx_gap; 
+      }
+
+      memcp_op_dst_e[memcp_indx]=(DMABlockSize/2-1)+offset+tx_rx_indx_gap;
+      memcp_op_len[memcp_indx]=DMABlockSize/2;
+      processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
+      total_byte_written+=memcp_op_len[memcp_indx]; 
+    }
+}
+
+void processCircularBufferCopy(unsigned int src_s,unsigned int src_e,unsigned int dst_s,unsigned int dst_e,unsigned int blocksize,unsigned int copylen){
+
+int i=0;
+/*
+unsigned int memcp_op_sub_src_s[10][10];
+unsigned int memcp_op_sub_src_e[10][10];
+unsigned int memcp_op_sub_dst_s[10][10];
+unsigned int memcp_op_sub_dst_e[10][10];
+unsigned int memcp_op_sub_len[10];
+memcp_op_sub_type[10][10]
+*/
+  if (src_e>src_s){
+    if (dst_e>dst_s){
+      //A1
+      
+      int src_len=src_e-src_s;
+      memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,src_len);
+
+      memcp_op_sub_type[memcp_indx][i]='A';
+      memcp_op_sub_src_s[memcp_indx][i]=src_s;
+      memcp_op_sub_src_e[memcp_indx][i]=src_e;
+      memcp_op_sub_dst_s[memcp_indx][i]=dst_s;
+      memcp_op_sub_dst_e[memcp_indx][i]=dst_e;
+      memcp_op_sub_len[memcp_indx][i]=src_len;
+      memcp_sub_indx[memcp_indx]=1;
+
+    }else{
+      //A2 //B
+      int dst_ep_len=DMABlockSize-dst_s;
+      memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,dst_ep_len);
+
+      memcp_op_sub_type[memcp_indx][i]='B';
+      memcp_op_sub_src_s[memcp_indx][i]=src_s;
+      memcp_op_sub_src_e[memcp_indx][i]=src_s+dst_ep_len;
+      memcp_op_sub_dst_s[memcp_indx][i]=dst_s;
+      memcp_op_sub_dst_e[memcp_indx][i]=dst_s+dst_ep_len;
+      memcp_op_sub_len[memcp_indx][i]=dst_ep_len;
+      i++;
+      
+      memcpy(DMA_BIT_TX_BUFFER,DMA_BIT_RX_BUFFER+src_s+dst_ep_len,dst_e);
+      
+      memcp_op_sub_type[memcp_indx][i]='B';
+      memcp_op_sub_src_s[memcp_indx][i]=src_s+dst_ep_len;
+      memcp_op_sub_src_e[memcp_indx][i]=src_e;
+      memcp_op_sub_dst_s[memcp_indx][i]=0;
+      memcp_op_sub_dst_e[memcp_indx][i]=dst_e;
+      memcp_op_sub_len[memcp_indx][i]=dst_e;
+      
+      i++;
+      memcp_sub_indx[memcp_indx]=i;
+    }
+  }
+  else {
+        
+    if (dst_e>dst_s){
+      //B1 // C
+      int src_ep_len=DMABlockSize-src_s;
+      memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,src_ep_len);
+
+      memcp_op_sub_type[memcp_indx][i]='C';
+      memcp_op_sub_src_s[memcp_indx][i]=src_s;
+      memcp_op_sub_src_e[memcp_indx][i]=src_s+src_ep_len;
+      memcp_op_sub_dst_s[memcp_indx][i]=dst_s;
+      memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len;
+      memcp_op_sub_len[memcp_indx][i]=src_ep_len;
+      i++;
+
+      memcpy(DMA_BIT_TX_BUFFER+dst_s+src_ep_len,DMA_BIT_RX_BUFFER,src_e);
+
+      memcp_op_sub_type[memcp_indx][i]='C';
+      memcp_op_sub_src_s[memcp_indx][i]=0;
+      memcp_op_sub_src_e[memcp_indx][i]=src_e;
+      memcp_op_sub_dst_s[memcp_indx][i]=dst_s+src_ep_len;
+      memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len+src_e;
+      memcp_op_sub_len[memcp_indx][i]=src_e;
+      i++;
+      memcp_sub_indx[memcp_indx]=i;
+
+    }else{
+      //B2_1 // D
+      int src_ep_len=blocksize-src_s;
+      int dst_ep_len=blocksize-dst_s;
+          
+      if (dst_ep_len>src_ep_len){
+              
+        memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,src_ep_len);
+
+        memcp_op_sub_type[memcp_indx][i]='D';
+        memcp_op_sub_src_s[memcp_indx][i]=src_s;
+        memcp_op_sub_src_e[memcp_indx][i]=src_s+src_ep_len;
+        memcp_op_sub_dst_s[memcp_indx][i]=dst_s;
+        memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len;
+        memcp_op_sub_len[memcp_indx][i]=src_ep_len;
+        i++;
+
+              
+        int dst_offset=dst_s+src_ep_len;
+        memcpy(DMA_BIT_TX_BUFFER+dst_offset,DMA_BIT_RX_BUFFER,blocksize-dst_offset);
+
+        memcp_op_sub_type[memcp_indx][i]='D';
+        memcp_op_sub_src_s[memcp_indx][i]=0;
+        memcp_op_sub_src_e[memcp_indx][i]=blocksize-dst_offset;
+        memcp_op_sub_dst_s[memcp_indx][i]=dst_offset;
+        memcp_op_sub_dst_e[memcp_indx][i]=dst_offset+blocksize-dst_offset;
+        memcp_op_sub_len[memcp_indx][i]=src_ep_len;
+        i++;
+              
+        int src_offset=DMABlockSize-dst_offset;
+        memcpy(DMA_BIT_TX_BUFFER,DMA_BIT_RX_BUFFER+src_offset,src_ep_len);
+
+        memcp_op_sub_type[memcp_indx][i]='D';
+        memcp_op_sub_src_s[memcp_indx][i]=src_offset;
+        memcp_op_sub_src_e[memcp_indx][i]=src_offset+src_ep_len;
+        memcp_op_sub_dst_s[memcp_indx][i]=0;
+        memcp_op_sub_dst_e[memcp_indx][i]=0+src_ep_len;
+        memcp_op_sub_len[memcp_indx][i]=src_ep_len;
+        i++;
+
+        memcp_sub_indx[memcp_indx]=i;
+
+      }else{
+        //B2_2 //E
+        memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,dst_ep_len);
+
+        memcp_op_sub_type[memcp_indx][i]='E';
+        memcp_op_sub_src_s[memcp_indx][i]=src_s;
+        memcp_op_sub_src_e[memcp_indx][i]=src_s+dst_ep_len;
+        memcp_op_sub_dst_s[memcp_indx][i]=dst_s;
+        memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len;
+        memcp_op_sub_len[memcp_indx][i]=dst_ep_len;
+        i++;
+              
+        int src_offset=src_s+src_ep_len;
+        memcpy(DMA_BIT_TX_BUFFER,DMA_BIT_RX_BUFFER+src_offset,blocksize-src_offset);
+
+        memcp_op_sub_type[memcp_indx][i]='E';
+        memcp_op_sub_src_s[memcp_indx][i]=src_offset;
+        memcp_op_sub_src_e[memcp_indx][i]=src_offset+blocksize-src_offset;
+        memcp_op_sub_dst_s[memcp_indx][i]=0;
+        memcp_op_sub_dst_e[memcp_indx][i]=blocksize-src_offset;
+        memcp_op_sub_len[memcp_indx][i]=blocksize-src_offset;
+        i++;
+              
+        int dst_offset=blocksize-src_offset;
+        memcpy(DMA_BIT_TX_BUFFER+dst_offset,DMA_BIT_RX_BUFFER,src_e);
+
+        memcp_op_sub_type[memcp_indx][i]='E';
+        memcp_op_sub_src_s[memcp_indx][i]=0;
+        memcp_op_sub_src_e[memcp_indx][i]=src_e;
+        memcp_op_sub_dst_s[memcp_indx][i]=dst_offset;
+        memcp_op_sub_dst_e[memcp_indx][i]=dst_offset+src_e;
+        memcp_op_sub_len[memcp_indx][i]=src_e;
+        i++;
+
+        memcp_sub_indx[memcp_indx]=i;
+
+      }
+    }
+  }
+}
 
 /**
   * @brief sort a new chainedlist of item alphabetically
@@ -448,7 +725,8 @@ void processBtnInterrupt(uint16_t GPIO_Pin){
 
   switch (GPIO_Pin){
     case BTN_UP_Pin:
-      ptrbtnDown(NULL);
+      //ptrbtnDown(NULL);
+      processBtnRet();
       printf("BTN UP\n"); 
       break;
     case BTN_DOWN_Pin:
@@ -460,6 +738,7 @@ void processBtnInterrupt(uint16_t GPIO_Pin){
       printf("BTN ENT\n");
       break;
     case BTN_RET_Pin:
+
       ptrbtnRet(NULL);
       printf("BTN RET\n");
       break;
@@ -558,6 +837,12 @@ void nothing(){
 }
 
 void processBtnRet(){
+  printf("debugging write Buffer\n");
+  //for (int i=0;i<10;i++){
+  //  dumpBuf(dbgWriteBuffer+i*256,i,256);
+  //}
+
+  //return;
   if (currentPage==MOUNT){
     swithPage(FS,NULL);
   }else if (currentPage==FS){
@@ -576,7 +861,8 @@ enum STATUS swithPage(enum page newPage,void * arg){
       ptrbtnUp=processNextFSItem;
       ptrbtnDown=processPrevFSItem;
       ptrbtnEntr=processSelectFSItem;
-      ptrbtnRet=nothing;
+      //ptrbtnRet=nothing;
+      ptrbtnRet=processBtnRet;
       currentPage=FS;
       break;
     case MENU:
@@ -649,8 +935,8 @@ const int position2Direction[8][8] = {               // position2Direction[X][Y]
 
 void processDiskHeadMove(uint16_t GPIO_Pin){
 
-  //if (isDiskIIDisable())
-  //  return;
+  if (isDiskIIDisable())
+    return;
   
   unsigned char stp=(GPIOA->IDR&0b0000000000001111);
 
@@ -723,7 +1009,7 @@ enum STATUS mountImagefile(char * filename){
   if (l>4 && 
       (!memcmp(filename+(l-4),"\x2E\x4E\x49\x43",4)  ||           // .NIC
        !memcmp(filename+(l-4),"\x2E\x6E\x69\x63",4))){            // .nic
-     DMABlockSize=16*408;
+     DMABlockSize=16*416;
      if (mountNicFile(filename)!=RET_OK)
         return RET_ERR;
     
@@ -789,11 +1075,8 @@ enum STATUS initeDMABuffering(){
 
   memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc,DMABlockSize); 
   HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,DMABlockSize);
-  //HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,8192);
-  
-  HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,1024);
-  
-  //printf("here\n");
+  HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,DMABlockSize);
+
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); 
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);   
   
@@ -888,11 +1171,15 @@ int main(void)
   //  initeDMABuffering();
   //  swithPage(IMAGE,NULL);
   //}else{
-    
+    //if (mountImagefile("BII.nic")!=RET_OK){
+      
     if (mountImagefile("Locksmithcrk.nic")!=RET_OK){
       printf("Mount Image Error\n");
     }
     
+    // debug
+    memset(dbgWriteBuffer,0,2560);
+
     initeDMABuffering();
     
     swithPage(FS,NULL);
@@ -909,7 +1196,7 @@ int main(void)
   // Config based last image mount
   
   unsigned int f=0,fp1=0,fm1=0;
-  int kk=0;
+  //int kk=0;
   while (1){
       
     /*
@@ -932,7 +1219,7 @@ int main(void)
     /*if (isDiskIIDisable()==1){
       printf("here\n");
     }*/
-    if (/*isDiskIIDisable()==0 && */prevTrk!=intTrk && fldImageMounted==1){  
+    if (isDiskIIDisable()==0 && prevTrk!=intTrk && fldImageMounted==1){  
       trk=intTrk;                                                                    // Track has changed, but avoid new change during the process
       f=0;                                                                           // flag for main track data found withing the adjacent track
       
@@ -1004,7 +1291,7 @@ int main(void)
       printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %d %d-%d-%d d1:%ld d2:%ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff1,diff2);
       prevTrk=trk;
     }else if (fldImageMounted==0){
-      printf("Fuck\n");
+      //printf("Fuck\n");
     }
 
     else if (nextAction!=NONE){                                         // Several action can not be done on Interrupt
@@ -1617,6 +1904,10 @@ static void MX_GPIO_Init(void)
   * @param  GPIO_Pin
   * @retval None
   */
+
+int keep_tx;
+int keep_rx;
+int p=0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
@@ -1640,12 +1931,72 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     processBtnInterrupt(GPIO_Pin);
 
   } else if (GPIO_Pin == WR_REQ_Pin){
-    
-    long pos=&hspi3.hdmarx->StreamBaseAddress;
-    long pos2=&hspi3.hdmarx->StreamIndex;
-    printf("WR_REQ %ld %ld\n",pos,pos2);
-    dumpBuf(DMA_BIT_RX_BUFFER,1,256);
-    memset(DMA_BIT_RX_BUFFER,0,1024);
+  
+    if (WR_REQ_PHASE==0){
+      WR_REQ_PHASE=1;
+      memcp_indx=0;
+      
+      //__HAL_DMA_SET_COUNTER(hspi3.hdmarx, 0);
+      //__HAL_DMA_SET_COUNTER(hspi1.hdmatx, 0);
+
+      rx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi3.hdmarx);
+      tx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);
+      keep_tx=tx_start_indx;
+      keep_rx=rx_start_indx;
+
+      tx_rx_indx_gap=tx_start_indx-rx_start_indx;
+      total_byte_written=0;
+
+    }else{                                                                            // Should be on falling Edge
+      WR_REQ_PHASE=0;
+  
+      rx_end_indx =  DMABlockSize - __HAL_DMA_GET_COUNTER(hspi3.hdmarx);
+      tx_end_indx =  DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);
+
+      memcp_op_src_s[memcp_indx]=rx_start_indx;
+      memcp_op_src_e[memcp_indx]=rx_end_indx;
+
+      if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
+        memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
+      }else{
+        memcp_op_dst_s[memcp_indx]=DMABlockSize+tx_rx_indx_gap; 
+      }
+
+      memcp_op_dst_e[memcp_indx]=memcp_op_src_e[memcp_indx]+tx_rx_indx_gap;
+      memcp_op_len[memcp_indx]=memcp_op_src_e[memcp_indx]-memcp_op_src_s[memcp_indx];
+
+      processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
+      total_byte_written+=memcp_op_len[memcp_indx];
+      memcp_indx++;
+      /*
+        memcp_op_sub_type[memcp_indx][i]='E';
+        memcp_op_sub_src_s[memcp_indx][i]=0;
+        memcp_op_sub_src_e[memcp_indx][i]=src_e;
+        memcp_op_sub_dst_s[memcp_indx][i]=dst_offset;
+        memcp_op_sub_dst_e[memcp_indx][i]=dst_offset+src_e;
+        memcp_op_sub_len[memcp_indx][i]=src_e;
+        i++;
+*/
+        //memcp_sub_indx[memcp_indx]=i;
+      
+      char filename[32];
+      sprintf(filename,"dump_%d",p);
+      dumpBufFile(filename,DMA_BIT_TX_BUFFER,DMABlockSize);
+      p++;
+      for (int i=0;i<memcp_indx;i++){
+        printf("cpy i:%02d half:%d Bloc_size:%d src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d tx_rx_gap:%03d total_byte:%04d\n",i,memcp_half[i],DMABlockSize, memcp_op_src_s[i],memcp_op_src_e[i],memcp_op_dst_s[i],memcp_op_dst_e[i], memcp_op_len[i], tx_rx_indx_gap,total_byte_written);
+        for (int j=0;j<memcp_sub_indx[i];j++){
+          printf("   subop j:%02d type:%c src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d \n",j,memcp_op_sub_type[i][j], memcp_op_sub_src_s[i][j],memcp_op_sub_src_e[i][j],memcp_op_sub_dst_s[i][j],memcp_op_sub_dst_e[i][j], memcp_op_sub_len[i][j]);
+        
+        }
+        printf("\n");
+      
+      }
+
+      printf("WR_REQ Ends ktx:%d krx:%d IntTRK:%d [RX S:%d, E:%d ] [TX S:%d, E:%d] DMABlk:%d\n",keep_tx,keep_rx, intTrk,rx_start_indx,rx_end_indx,tx_start_indx,tx_end_indx,DMABlockSize);
+      dumpBuf(DMA_BIT_TX_BUFFER+keep_tx,1,512);
+    }
+
   }
   
   
