@@ -150,21 +150,25 @@ unsigned char prevTrk=0;                                    // prevTrk to keep t
 unsigned int DMABlockSize=6656;//6592; // 6656        // Size of the DMA Buffer => full track width with 13 block of 512
 unsigned char read_track_data_bloc[19968];                   // 3 adjacent track of 13 bloc of 512
   
-unsigned char DMA_BIT_TX_BUFFER[8192];                         // DMA Buffer from the SPI
+unsigned char DMA_BIT_TX_BUFFER[6656];                         // DMA Buffer from the SPI
 unsigned char DMA_BIT_RX_BUFFER[6656];                         // DMA Buffer from the SPI
+unsigned char dump_rx_buffer[6656]; 
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
 
-unsigned int WR_REQ_PHASE=0;
+volatile unsigned int WR_REQ_PHASE=0;
                               
 long database=0;                                            // start of the data segment in FAT
 int csize=0;                                                // Cluster size
+extern uint8_t CardType;                                            // fatfs_sdcard.c type of SD card
 
-unsigned char fldImageMounted=0;                            // Image file mount status flag
+volatile unsigned char flgDeviceEnable=0;
+unsigned char flgImageMounted=0;                            // Image file mount status flag
 unsigned char flgBeaming=0;                                 // DMA SPI1 to Apple II Databeaming status flag
-unsigned int  flgwhiteNoise=0;                              // White noise in case of blank 255 track to generate random bit 
+volatile unsigned int  flgwhiteNoise=0;                              // White noise in case of blank 255 track to generate random bit 
 
-enum STATUS (*getTrackBitStream)(int,unsigned char*);       // pointer to bitStream function according to driver woz/nic
+enum STATUS (*getTrackBitStream)(int,unsigned char*);       // pointer to readBitStream function according to driver woz/nic
+enum STATUS (*setTrackBitStream)(int,unsigned char*);       // pointer to writeBitStream function according to driver woz/nic
 long (*getSDAddr)(int ,int ,int , long);                    // pointer to getSDAddr function
 int  (*getTrackFromPh)(int);                                // pointer to track calculation function
 
@@ -181,8 +185,7 @@ volatile uint16_t rx_end_indx;
 volatile uint16_t tx_start_indx;
 volatile uint16_t tx_end_indx;
 volatile int tx_rx_indx_gap;
-
-char dbgWriteBuffer[2560];                             // 35*512 aim to store the write buffer first 512 bytes per track 
+int p=0;
 
 extern JSON_Object *configParams;
 
@@ -206,35 +209,82 @@ void EnableTiming(void){
   *DWT_CONTROL |= 1 ;               // enable the counter
 }
 
-void dumpBufFile(char * filename,char * buffer,int length){
+enum STATUS dumpBufFile(char * filename,char * buffer,int length){
 
   FATFS FatFs; 	//Fatfs handle
-  FIL fil; 		//File handle
+  FIL fil; 		  //File handle
   FRESULT fres; //Result after operations
-
+  
   fres = f_mount(&FatFs, "", 1); //1=mount now
   if (fres != FR_OK) {
-	  printf("f_mount error (%i)\r\n", fres);
-	  while(1);
+	  printf("f_mount error (%i)\n", fres);
+    return RET_ERR;
   }
   
   fres = f_open(&fil, filename, FA_WRITE | FA_OPEN_ALWAYS | FA_CREATE_ALWAYS);
+  if(fres != FR_OK) {
+	  printf("f_open error (%i)\n", fres);
+    return RET_ERR;
+  }
+ 
+  UINT bytesWrote;
+  UINT totalBytes=0;
+
+  for (int i=0;i<13;i++){
+    fres = f_write(&fil, buffer+i*512, 512, &bytesWrote);
+    if(fres == FR_OK) {
+      totalBytes+=bytesWrote;
+    }else{
+	    printf("f_write error (%i)\n",fres);
+      return RET_ERR;
+    }
+  }
+  printf("Wrote %i bytes to '%s'!\n", totalBytes,filename);
+  f_close(&fil);
+  return RET_OK;
+}
+
+enum STATUS writeTrkFile(char * filename,char * buffer,uint32_t offset){
   
-  if(fres == FR_OK) {
-    printf("open for write ok");
-	} else {
-	  printf("f_open error (%i)\r\n", fres);
+  FATFS FatFs; 	//Fatfs handle
+  FIL fil; 		  //File handle
+  FRESULT fres; //Result after operations
+  
+  fres = f_mount(&FatFs, "", 1); //1=mount now
+  if (fres != FR_OK) {
+	  printf("f_mount error (%i)\n", fres);
+    return RET_ERR;
+  }
+  
+  fres = f_open(&fil, filename, FA_WRITE | FA_OPEN_ALWAYS | FA_CREATE_ALWAYS);
+  if(fres != FR_OK) {
+	  printf("f_open error (%i)\n", fres);
+    return RET_ERR;
+  }
+
+  fres=f_lseek(&fil,offset);
+  if(fres != FR_OK) {
+    printf("f_lseek error");
+    return RET_ERR;
   }
 
   UINT bytesWrote;
-  fres = f_write(&fil, buffer, length, &bytesWrote);
-  if(fres == FR_OK) {
-	  printf("Wrote %i bytes to 'write.txt'!\r\n", bytesWrote);
-  } else {
-	  printf("f_write error (%i)\r\n");
+  UINT totalBytes=0;
+
+  for (int i=0;i<13;i++){
+    fres = f_write(&fil, buffer+i*512, 512, &bytesWrote);
+    if(fres == FR_OK) {
+      totalBytes+=bytesWrote;
+    }else{
+	    printf("f_write error (%i)\n",fres);
+      return RET_ERR;
+    }
   }
 
+  printf("Wrote %i bytes to '%s' starting at %ld!\n", totalBytes,filename,offset);
   f_close(&fil);
+  return RET_OK;
+
 }
 
 void dumpBuf(unsigned char * buf,long memoryAddr,int len){
@@ -297,6 +347,50 @@ enum STATUS cmd18GetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,in
   return RET_OK;
 }
 
+
+enum STATUS cmd25SetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,int count){
+  
+  int ret=0;
+  if (CardType & CT_SD1)
+    {
+      if ((ret=getSDCMD(CMD55, 0)!=0)){
+          printf("SDCard cmd55 Error\n");
+          return RET_ERR;
+      }
+
+      if ((ret=getSDCMD(CMD23, count)!=0)){
+          printf("SDCard cmd23 Error\n");
+          return RET_ERR;
+      }
+  }
+
+  if ((ret=getSDCMD(CMD25, memoryAdr) == 0)){
+    do{
+      if (!setSDDataBlockBareMetal((BYTE *)buffer, 0xFC)){
+        printf("SDCard setSDDataBlockBareMetal Error OxFC\n");
+        ret=-1;
+        break;
+      }  
+      buffer += 512;
+    } while (--count);
+
+      if(!setSDDataBlockBareMetal(0, 0xFD)){
+        printf("SDCard setSDDataBlockBareMetal Error OxFD\n");
+        ret=-1;
+      }
+
+      if (ret==-1){
+        return RET_ERR;
+      }
+
+  }
+  else{
+    printf("SDCard cmd25 Error\n");
+    return RET_ERR;
+  }
+  return RET_OK;
+}
+
 /*
  The next 2 functions are called during the DMA transfer from Memory to SPI1
  2 buffers are used to managed the timing of getting the data from the SDCard & populating the buffer
@@ -324,29 +418,27 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi){
   return;
 }
 
-unsigned int memcp_indx=0;
-unsigned int memcp_sub_indx[10];
-unsigned int memcp_op_src_s[10];
-unsigned int memcp_op_src_e[10];
-unsigned int memcp_op_dst_s[10];
-unsigned int memcp_op_dst_e[10];
-unsigned int memcp_op_len[10];
-unsigned int memcp_half[10];
-unsigned int total_byte_written=0;
+volatile unsigned int memcp_indx=0;
+volatile unsigned int dst_s_index=0;
+ int memcp_sub_indx[10];
+ int memcp_op_src_s[10];
+ int memcp_op_src_e[10];
+ int memcp_op_dst_s[10];
+ int memcp_op_dst_e[10];
+ int memcp_op_len[10];
+ int memcp_half[10];
+ int total_byte_written=0;
 
-unsigned int memcp_op_sub_src_s[10][10];
-unsigned int memcp_op_sub_src_e[10][10];
-unsigned int memcp_op_sub_dst_s[10][10];
-unsigned int memcp_op_sub_dst_e[10][10];
-unsigned int memcp_op_sub_len[10][10];
+ int memcp_op_sub_src_s[10][10];
+ int memcp_op_sub_src_e[10][10];
+ int memcp_op_sub_dst_s[10][10];
+ int memcp_op_sub_dst_e[10][10];
+ int memcp_op_sub_len[10][10];
 unsigned char memcp_op_sub_type[10][10];
-
-
 
 void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef * hspi){
   
    if (WR_REQ_PHASE==1){
-        // Copy the first half of the buffer to 
     computeCircularAddr(0);
     memcp_half[memcp_indx]=0;
     rx_start_indx=(DMABlockSize/2)-1;
@@ -357,7 +449,7 @@ void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef * hspi){
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 {
   if (WR_REQ_PHASE==1){
-        // Copy the first half of the buffer to 
+   
     computeCircularAddr(1);
     memcp_half[memcp_indx]=1;
     rx_start_indx=0;
@@ -375,42 +467,68 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 void computeCircularAddr(int half){
 
   int offset=(DMABlockSize/2)*half;
+  volatile int psrc_s=0;
+  volatile int psrc_e=0;
+  volatile int pdst_s=0;
+  volatile int pdst_e=0;
+  volatile int plen=0;
+  
+// WARNING write process IS FASTER than read, the tx_rx_gap will increase during the process,
+// the best way is to keep track of the dst_s index = dst_s+plen after the first iteration
+
   if (memcp_indx==0 && rx_start_indx>=(DMABlockSize/2)*half  && rx_start_indx<(DMABlockSize/2)*(half+1)){
-        memcp_op_src_s[memcp_indx]=rx_start_indx;
-        memcp_op_src_e[memcp_indx]=(DMABlockSize/2-1)+offset;
-        memcp_op_len[memcp_indx]=memcp_op_src_e[memcp_indx]-memcp_op_src_s[memcp_indx];
+        psrc_s=rx_start_indx;
+        psrc_e=(DMABlockSize/2-1)+offset;
+
+        plen=psrc_e-psrc_s;
         
-        if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
-          memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
+        if( (psrc_s+tx_rx_indx_gap)>0 ){
+          pdst_s=(psrc_s+tx_rx_indx_gap)%DMABlockSize;
         }else{
-          memcp_op_dst_s[memcp_indx]=(DMABlockSize/2)+tx_rx_indx_gap;
+          pdst_s=DMABlockSize+tx_rx_indx_gap;
         }
 
-        memcp_op_dst_e[memcp_indx]=(DMABlockSize/2-1)+offset+tx_rx_indx_gap;
-        processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
-        total_byte_written+=memcp_op_len[memcp_indx];
+        pdst_e=(pdst_s+plen)%DMABlockSize;
+        memcpy(dump_rx_buffer,DMA_BIT_RX_BUFFER+psrc_s,plen);
+        processCircularBufferCopy(psrc_s,psrc_e,pdst_s,pdst_e,DMABlockSize,plen);
+        total_byte_written+=plen;
+        dst_s_index=(pdst_s+plen)%DMABlockSize;
     
     }else if(memcp_indx!=0){
       // copy the full first half
-      memcp_op_src_s[memcp_indx]=offset;
-      memcp_op_src_e[memcp_indx]=(DMABlockSize/2-1)+offset;
+      psrc_s=offset;
+      psrc_e=(DMABlockSize/2-1)+offset;
 
-      if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
-        memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
+      /*if( (psrc_s+tx_rx_indx_gap)>0){
+        pdst_s=(psrc_s+tx_rx_indx_gap)%DMABlockSize;
       }else{
-        memcp_op_dst_s[memcp_indx]=DMABlockSize+tx_rx_indx_gap; 
-      }
-
-      memcp_op_dst_e[memcp_indx]=(DMABlockSize/2-1)+offset+tx_rx_indx_gap;
-      memcp_op_len[memcp_indx]=DMABlockSize/2;
-      processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
-      total_byte_written+=memcp_op_len[memcp_indx]; 
+        pdst_s=DMABlockSize+tx_rx_indx_gap; 
+      }*/
+      pdst_s=dst_s_index;
+      plen=DMABlockSize/2;
+      pdst_e=(pdst_s+plen-1)%DMABlockSize;
+    
+      processCircularBufferCopy(psrc_s,psrc_e,pdst_s,pdst_e,DMABlockSize,plen);
+      total_byte_written+=plen;
+      dst_s_index=(pdst_s+plen)%DMABlockSize;
     }
+
+memcp_op_src_s[memcp_indx]=psrc_s;
+memcp_op_src_e[memcp_indx]=psrc_e;
+memcp_op_dst_s[memcp_indx]=pdst_s;
+memcp_op_dst_e[memcp_indx]=pdst_e;
+memcp_op_len[memcp_indx]=plen;
+memcp_half[memcp_indx]=half;
+
 }
+
+
+
 
 void processCircularBufferCopy(unsigned int src_s,unsigned int src_e,unsigned int dst_s,unsigned int dst_e,unsigned int blocksize,unsigned int copylen){
 
 int i=0;
+
 /*
 unsigned int memcp_op_sub_src_s[10][10];
 unsigned int memcp_op_sub_src_e[10][10];
@@ -433,10 +551,11 @@ memcp_op_sub_type[10][10]
       memcp_op_sub_dst_e[memcp_indx][i]=dst_e;
       memcp_op_sub_len[memcp_indx][i]=src_len;
       memcp_sub_indx[memcp_indx]=1;
-
+      
     }else{
       //A2 //B
       int dst_ep_len=DMABlockSize-dst_s;
+      
       memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,dst_ep_len);
 
       memcp_op_sub_type[memcp_indx][i]='B';
@@ -465,6 +584,7 @@ memcp_op_sub_type[10][10]
     if (dst_e>dst_s){
       //B1 // C
       int src_ep_len=DMABlockSize-src_s;
+     
       memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,src_ep_len);
 
       memcp_op_sub_type[memcp_indx][i]='C';
@@ -474,7 +594,7 @@ memcp_op_sub_type[10][10]
       memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len;
       memcp_op_sub_len[memcp_indx][i]=src_ep_len;
       i++;
-
+     
       memcpy(DMA_BIT_TX_BUFFER+dst_s+src_ep_len,DMA_BIT_RX_BUFFER,src_e);
 
       memcp_op_sub_type[memcp_indx][i]='C';
@@ -492,7 +612,7 @@ memcp_op_sub_type[10][10]
       int dst_ep_len=blocksize-dst_s;
           
       if (dst_ep_len>src_ep_len){
-              
+             
         memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,src_ep_len);
 
         memcp_op_sub_type[memcp_indx][i]='D';
@@ -503,7 +623,7 @@ memcp_op_sub_type[10][10]
         memcp_op_sub_len[memcp_indx][i]=src_ep_len;
         i++;
 
-              
+             
         int dst_offset=dst_s+src_ep_len;
         memcpy(DMA_BIT_TX_BUFFER+dst_offset,DMA_BIT_RX_BUFFER,blocksize-dst_offset);
 
@@ -514,7 +634,7 @@ memcp_op_sub_type[10][10]
         memcp_op_sub_dst_e[memcp_indx][i]=dst_offset+blocksize-dst_offset;
         memcp_op_sub_len[memcp_indx][i]=src_ep_len;
         i++;
-              
+             
         int src_offset=DMABlockSize-dst_offset;
         memcpy(DMA_BIT_TX_BUFFER,DMA_BIT_RX_BUFFER+src_offset,src_ep_len);
 
@@ -530,6 +650,7 @@ memcp_op_sub_type[10][10]
 
       }else{
         //B2_2 //E
+        
         memcpy(DMA_BIT_TX_BUFFER+dst_s,DMA_BIT_RX_BUFFER+src_s,dst_ep_len);
 
         memcp_op_sub_type[memcp_indx][i]='E';
@@ -539,7 +660,7 @@ memcp_op_sub_type[10][10]
         memcp_op_sub_dst_e[memcp_indx][i]=dst_s+src_ep_len;
         memcp_op_sub_len[memcp_indx][i]=dst_ep_len;
         i++;
-              
+            
         int src_offset=src_s+src_ep_len;
         memcpy(DMA_BIT_TX_BUFFER,DMA_BIT_RX_BUFFER+src_offset,blocksize-src_offset);
 
@@ -550,7 +671,7 @@ memcp_op_sub_type[10][10]
         memcp_op_sub_dst_e[memcp_indx][i]=blocksize-src_offset;
         memcp_op_sub_len[memcp_indx][i]=blocksize-src_offset;
         i++;
-              
+            
         int dst_offset=blocksize-src_offset;
         memcpy(DMA_BIT_TX_BUFFER+dst_offset,DMA_BIT_RX_BUFFER,src_e);
 
@@ -597,6 +718,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   * @retval None
   */
 list_t * sortLinkedList(list_t * plst){
+
   list_t *  sorteddirChainedList = list_new();
   list_node_t *pItem;
   list_node_t *cItem;
@@ -711,8 +833,24 @@ enum STATUS walkDir(char * path){
   * @param None
   * @retval None
   */
-int isDiskIIDisable(){
-  return HAL_GPIO_ReadPin(DEVICE_ENABLE_GPIO_Port,DEVICE_ENABLE_Pin);
+
+char processDeviceEnableInterrupt(uint16_t GPIO_Pin){
+  // The DEVICE_ENABLE signal from the Disk controller is activeLow
+  // This signal is inverted to get active High signal trought LS14 U9E (P_11_I/P_10_O)
+  // flgDeviceEnable=1 when Drive is activate 
+  
+  flgDeviceEnable=HAL_GPIO_ReadPin(DEVICE_ENABLE_GPIO_Port,GPIO_Pin);
+  if (flgDeviceEnable==1){
+    printf("flgDeviceEnable==1\n");
+   // HAL_SPI_Transmit_DMA(&hspi1,DMA_BIT_TX_BUFFER,DMABlockSize);
+   // HAL_SPI_Receive_DMA(&hspi3,DMA_BIT_RX_BUFFER,DMABlockSize);
+
+  }else{
+    printf("flgDeviceEnable==0\n");
+    // HAL_SPI_DMAStop(&hspi1);
+    //HAL_SPI_DMAStop(&hspi3);
+  }
+  return flgDeviceEnable;
 }
 
 /**
@@ -837,12 +975,11 @@ void nothing(){
 }
 
 void processBtnRet(){
-  printf("debugging write Buffer\n");
-  //for (int i=0;i<10;i++){
-  //  dumpBuf(dbgWriteBuffer+i*256,i,256);
-  //}
+  //printf("debugging write Buffer\n");
+  sprintf(selItem,"F|FT.woz");
+  nextAction=IMG_MOUNT; 
+  return;
 
-  //return;
   if (currentPage==MOUNT){
     swithPage(FS,NULL);
   }else if (currentPage==FS){
@@ -892,6 +1029,7 @@ enum STATUS swithPage(enum page newPage,void * arg){
 
 
  // ONLY FOR DEBUGGING
+/*
 int k1=0;
 unsigned char dbgStp[1024];
 unsigned char dbgNewPosition[1024];
@@ -899,7 +1037,7 @@ unsigned char dbgLastPosition[1024];
 unsigned char dbgPhtrk[1024];
 unsigned char dbgTrk[1024];
 int dbg_move[1024];
-
+*/
 
 // Magnet States --> Stepper Motor Position
 //
@@ -933,10 +1071,12 @@ const int position2Direction[8][8] = {               // position2Direction[X][Y]
     {  1,  2,  3,  0, -3, -2, -1,  0 }, // 7 NW
 };
 
-void processDiskHeadMove(uint16_t GPIO_Pin){
+void processDiskHeadMoveInterrupt(uint16_t GPIO_Pin){
 
-  if (isDiskIIDisable())
+  if(flgDeviceEnable==0)
     return;
+  //printf("E0\n");
+  //fflush(stdout);
   
   unsigned char stp=(GPIOA->IDR&0b0000000000001111);
 
@@ -957,22 +1097,26 @@ void processDiskHeadMove(uint16_t GPIO_Pin){
     intTrk=getTrackFromPh(ph_track);
   
     // Only for debugging to be removed
-    if (k1<1024){
+   /* if (k1<1024){
       dbg_move[k1]=move;
       dbgPhtrk[k1]=ph_track;
       dbgStp[k1]=stp;
       dbgLastPosition[k1]=lastPosition;
       dbgNewPosition[k1]=newPosition;
     }
+
     k1++;
     //
+    */
   }
+  //printf("E1\n");
+  //fflush(stdout);
 }
 
 enum STATUS mountImagefile(char * filename){
   int l=0;
   
-  fldImageMounted=0;
+  flgImageMounted=0;
   if (filename==NULL)
     return RET_ERR;
 
@@ -1025,19 +1169,21 @@ enum STATUS mountImagefile(char * filename){
 
     getSDAddr=getSDAddrWoz;
     getTrackBitStream=getWozTrackBitStream;
+    setTrackBitStream=setWozTrackBitStream;
     getTrackFromPh=getWozTrackFromPh;
-
+    printf("seem good\n");
   }else{
     return RET_ERR;
   }
+
   printf("Mount OK\n");
-  fldImageMounted=1;
+  flgImageMounted=1;
   return RET_OK;
 }
 
 enum STATUS initeDMABuffering(){
   
-  if (fldImageMounted!=1){
+  if (flgImageMounted!=1){
     return RET_ERR;
   }
   HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);   
@@ -1151,7 +1297,6 @@ int main(void)
                                                                      
   unsigned long t1,t2,diff1,diff2;
   currentFullPath[0]=0x0;                                                            // Root is ""
-  
   fres = f_mount(&fs, "", 1);                                       
   if (fres == FR_OK) {
     walkDir(currentFullPath);
@@ -1171,16 +1316,19 @@ int main(void)
   //  initeDMABuffering();
   //  swithPage(IMAGE,NULL);
   //}else{
-    //if (mountImagefile("BII.nic")!=RET_OK){
-      
+  //if (mountImagefile("FT.woz")!=RET_OK){
+    
+    
+    //if (mountImagefile("/Blank.woz")!=RET_OK){
+    
     if (mountImagefile("Locksmithcrk.nic")!=RET_OK){
       printf("Mount Image Error\n");
     }
-    
-    // debug
-    memset(dbgWriteBuffer,0,2560);
-
-    initeDMABuffering();
+  
+    if (flgImageMounted==1){
+      initeDMABuffering();
+      processDeviceEnableInterrupt(DEVICE_ENABLE_Pin);
+    }
     
     swithPage(FS,NULL);
   //}
@@ -1196,6 +1344,10 @@ int main(void)
   // Config based last image mount
   
   unsigned int f=0,fp1=0,fm1=0;
+  unsigned long cAlive=0;
+
+
+  memset(dump_rx_buffer,0,DMABlockSize);
   //int kk=0;
   while (1){
       
@@ -1219,14 +1371,15 @@ int main(void)
     /*if (isDiskIIDisable()==1){
       printf("here\n");
     }*/
-    if (isDiskIIDisable()==0 && prevTrk!=intTrk && fldImageMounted==1){  
+    if (flgDeviceEnable==1 && prevTrk!=intTrk && flgImageMounted==1){  
       trk=intTrk;                                                                    // Track has changed, but avoid new change during the process
       f=0;                                                                           // flag for main track data found withing the adjacent track
       
-      DWT->CYCCNT = 0;                                                               // Reset cpu cycle counter
-      t1 = DWT->CYCCNT;
+      //DWT->CYCCNT = 0;                                                               // Reset cpu cycle counter
+      //t1 = DWT->CYCCNT;
+      //printf("A0A\n");
       HAL_SPI_DMAPause(&hspi1);                                                      // Pause the current DMA
-      
+      //printf("A0B\n");
       if (trk==255){    
         for (int i=0;i<DMABlockSize;i++){
           DMA_BIT_TX_BUFFER[i]=rand();
@@ -1241,7 +1394,7 @@ int main(void)
       flgwhiteNoise=0;
       
       // FIRST MANAGE THE MAIN TRACK & RESTORE AS QUICKLY AS POSSIBLE THE DMA
-
+      
       for (int i=0;i<3;i++){
         if (woz_sel_trk[i]==trk){
           f=1;
@@ -1256,15 +1409,16 @@ int main(void)
         woz_sel_trk[1]=trk;
           
       }
+      //printf("A1\n");
 
       memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc+woz_block_sel_012*DMABlockSize,DMABlockSize);      // copy the new track data to the DMA Buffer
       HAL_SPI_DMAResume(&hspi1); 
       //dumpBuf(DMA_BIT_TX_BUFFER,666,512);
-      t2 = DWT->CYCCNT;
-      diff1 = t2 - t1;
+      //t2 = DWT->CYCCNT;
+      //diff1 = t2 - t1;
 
-      DWT->CYCCNT = 0;                                                                            // Reset cpu cycle counter
-      t1 = DWT->CYCCNT;
+      //DWT->CYCCNT = 0;                                                                            // Reset cpu cycle counter
+      //t1 = DWT->CYCCNT;
 
       // THEN MANAGE THE MAIN TRACK & RESTORE AS QUICKLY AS POSSIBLE THE DMA
 
@@ -1278,7 +1432,7 @@ int main(void)
         getTrackBitStream(trk+1,read_track_data_bloc+selP1*DMABlockSize);     
         woz_sel_trk[selP1]=(trk+1);                                                               // change the trk in the selector
       }
-
+     //printf("A2\n");
       if (woz_sel_trk[selM1]==(trk-1)){
         fm1=1;
       }
@@ -1286,17 +1440,46 @@ int main(void)
         getTrackBitStream(trk-1,read_track_data_bloc+selM1*DMABlockSize);     
         woz_sel_trk[selM1]=(trk-1);                                                               // change the trk in the selector
       }
-      t2 = DWT->CYCCNT;
-      diff2 = t2 - t1;
-      printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %d %d-%d-%d d1:%ld d2:%ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff1,diff2);
+      //printf("A3\n");
+      //t2 = DWT->CYCCNT;
+      //diff2 = t2 - t1;
+      //printf("ph:%02d newTrak:%02d, prevTrak:%02d, %02d-%02d-%02d %d %d-%d-%d d1:%ld d2:%ld\n",ph_track,trk,prevTrk,woz_sel_trk[selM1],woz_sel_trk[woz_block_sel_012],woz_sel_trk[selP1],woz_block_sel_012,fm1,f,fp1,diff1,diff2);
+      printf("track change prevtrk:%d => trk:%d\n",prevTrk,trk);
       prevTrk=trk;
-    }else if (fldImageMounted==0){
+
+    }else if (flgImageMounted==0){
       //printf("Fuck\n");
+      
     }
 
     else if (nextAction!=NONE){                                         // Several action can not be done on Interrupt
       
       switch(nextAction){
+        
+        case WRITE_TRK:
+          long offset=3*512+intTrk*13*512;
+          writeTrkFile("/Blank.woz",DMA_BIT_TX_BUFFER,offset);
+          /*if(setTrackBitStream(intTrk,DMA_BIT_TX_BUFFER)!=0){
+            printf("error writing the track\n");
+          }else{
+            printf("good write\n");
+          }*/
+          nextAction=NONE;
+          //printf("write track to file");
+
+          break;
+        case DUMP_TX:
+          char filename[32];
+          sprintf(filename,"dump_tx_trk%d_p%d.bin",intTrk,p);
+
+          dumpBufFile(filename,DMA_BIT_TX_BUFFER,DMABlockSize);
+
+          sprintf(filename,"dump_rx_trk%d_p%d.bin",intTrk,p);
+          dumpBufFile(filename,dump_rx_buffer,DMABlockSize);
+          memset(DMA_BIT_RX_BUFFER,0,DMABlockSize);                      // WARNING TO BE TESTED
+          memset(dump_rx_buffer,0,DMABlockSize);     
+          nextAction=NONE;
+          break;
         case FSDISP:
           list_destroy(dirChainedList);
           walkDir(currentFullPath);
@@ -1321,6 +1504,13 @@ int main(void)
           break;
         default:
           break;
+      }
+    }else{
+      cAlive++;
+      if (cAlive==50000000){
+        printf(".\n");
+        //printf("still alive diskEnable=%d,prevTrk:%d!=%d ImgMounted:%d\n",flgDeviceEnable,prevTrk,intTrk,flgImageMounted);
+        cAlive=0;
       }
     }
   }
@@ -1731,7 +1921,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 0;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 31;
+  htim4.Init.Period = 3;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
@@ -1745,7 +1935,7 @@ static void MX_TIM4_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 16;
+  sConfigOC.Pulse = 2;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
@@ -1844,17 +2034,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : DEVICE_ENABLE_Pin */
-  GPIO_InitStruct.Pin = DEVICE_ENABLE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  /*Configure GPIO pins : DEVICE_ENABLE_Pin SD_EJECT_Pin */
+  GPIO_InitStruct.Pin = DEVICE_ENABLE_Pin|SD_EJECT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(DEVICE_ENABLE_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : SD_EJECT_Pin */
-  GPIO_InitStruct.Pin = SD_EJECT_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(SD_EJECT_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : WR_PROTECT_Pin */
   GPIO_InitStruct.Pin = WR_PROTECT_Pin;
@@ -1888,6 +2072,9 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
@@ -1907,7 +2094,7 @@ static void MX_GPIO_Init(void)
 
 int keep_tx;
 int keep_rx;
-int p=0;
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
@@ -1918,8 +2105,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
       GPIO_Pin == STEP3_Pin 
      ) {            // Step 3 PB11
     
-    processDiskHeadMove(GPIO_Pin);
+    processDiskHeadMoveInterrupt(GPIO_Pin);
    
+  }else if (GPIO_Pin==DEVICE_ENABLE_Pin){
+    processDeviceEnableInterrupt(DEVICE_ENABLE_Pin);
   }else if ((GPIO_Pin == BTN_RET_Pin  ||      // BTN_RETURN
             GPIO_Pin == BTN_ENTR_Pin  ||      // BTN_ENTER
             GPIO_Pin == BTN_UP_Pin    ||      // BTN_UP
@@ -1932,75 +2121,81 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
   } else if (GPIO_Pin == WR_REQ_Pin){
   
-    if (WR_REQ_PHASE==0){
+    if (WR_REQ_PHASE==0){                                                 // Instruction order are critical
+      rx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi3.hdmarx);
+      tx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);
+      
+      if (flgDeviceEnable==0)                       // No Write is Motor is not running
+        return;
+
       WR_REQ_PHASE=1;
       memcp_indx=0;
       
       //__HAL_DMA_SET_COUNTER(hspi3.hdmarx, 0);
       //__HAL_DMA_SET_COUNTER(hspi1.hdmatx, 0);
 
-      rx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi3.hdmarx);
-      tx_start_indx= DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);
+
+      
       keep_tx=tx_start_indx;
       keep_rx=rx_start_indx;
 
       tx_rx_indx_gap=tx_start_indx-rx_start_indx;
       total_byte_written=0;
 
-    }else{                                                                            // Should be on falling Edge
-      WR_REQ_PHASE=0;
-  
+    }else{
       rx_end_indx =  DMABlockSize - __HAL_DMA_GET_COUNTER(hspi3.hdmarx);
-      tx_end_indx =  DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);
-
-      memcp_op_src_s[memcp_indx]=rx_start_indx;
-      memcp_op_src_e[memcp_indx]=rx_end_indx;
-
-      if( (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)>0 && (memcp_op_src_s[memcp_indx]+tx_rx_indx_gap)<DMABlockSize){
-        memcp_op_dst_s[memcp_indx]=memcp_op_src_s[memcp_indx]+tx_rx_indx_gap;
-      }else{
-        memcp_op_dst_s[memcp_indx]=DMABlockSize+tx_rx_indx_gap; 
-      }
-
-      memcp_op_dst_e[memcp_indx]=memcp_op_src_e[memcp_indx]+tx_rx_indx_gap;
-      memcp_op_len[memcp_indx]=memcp_op_src_e[memcp_indx]-memcp_op_src_s[memcp_indx];
-
-      processCircularBufferCopy(memcp_op_src_s[memcp_indx],memcp_op_src_e[memcp_indx],memcp_op_dst_s[memcp_indx],memcp_op_dst_e[memcp_indx],DMABlockSize,memcp_op_len[memcp_indx]);
-      total_byte_written+=memcp_op_len[memcp_indx];
-      memcp_indx++;
-      /*
-        memcp_op_sub_type[memcp_indx][i]='E';
-        memcp_op_sub_src_s[memcp_indx][i]=0;
-        memcp_op_sub_src_e[memcp_indx][i]=src_e;
-        memcp_op_sub_dst_s[memcp_indx][i]=dst_offset;
-        memcp_op_sub_dst_e[memcp_indx][i]=dst_offset+src_e;
-        memcp_op_sub_len[memcp_indx][i]=src_e;
-        i++;
-*/
-        //memcp_sub_indx[memcp_indx]=i;
+      tx_end_indx =  DMABlockSize - __HAL_DMA_GET_COUNTER(hspi1.hdmatx);                                                                         // Should be on falling Edge
       
-      char filename[32];
-      sprintf(filename,"dump_%d",p);
-      dumpBufFile(filename,DMA_BIT_TX_BUFFER,DMABlockSize);
+      WR_REQ_PHASE=0;
+
+      volatile int fsrc_s=0;
+      volatile int fsrc_e=0;
+      volatile int fdst_s=0;
+      volatile int fdst_e=0;
+      volatile int flen=0;
+      //memcpy(dump_rx_buffer,DMA_BIT_RX_BUFFER,DMABlockSize);
+      
+      fsrc_s=rx_start_indx;
+      fsrc_e=rx_end_indx;
+
+      /*
+      if( (fsrc_s+tx_rx_indx_gap)>0){
+        fdst_s=(fsrc_s+tx_rx_indx_gap)%DMABlockSize;
+      }else{
+        fdst_s=DMABlockSize+tx_rx_indx_gap; 
+      }
+      */
+      fdst_s=dst_s_index;
+      flen=fsrc_e-fsrc_s;
+      fdst_e=(dst_s_index+flen)%DMABlockSize;
+      
+
+      processCircularBufferCopy(fsrc_s,fsrc_e,fdst_s,fdst_e,DMABlockSize,flen);
+      total_byte_written+=flen;
+      
+      memcp_op_src_s[memcp_indx]=fsrc_s;
+      memcp_op_src_e[memcp_indx]=fsrc_e;
+      memcp_op_dst_s[memcp_indx]=fdst_s;
+      memcp_op_dst_e[memcp_indx]=fdst_e;
+      memcp_op_len[memcp_indx]=flen;
+      memcp_half[memcp_indx]=2;
+      
+      memcp_indx++;
+      
+      nextAction=DUMP_TX;
+      //nextAction=WRITE_TRK;
       p++;
       for (int i=0;i<memcp_indx;i++){
-        printf("cpy i:%02d half:%d Bloc_size:%d src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d tx_rx_gap:%03d total_byte:%04d\n",i,memcp_half[i],DMABlockSize, memcp_op_src_s[i],memcp_op_src_e[i],memcp_op_dst_s[i],memcp_op_dst_e[i], memcp_op_len[i], tx_rx_indx_gap,total_byte_written);
+        printf("cpy i:%02d half:%d BlocSize:%d src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d  tx_start:0x%04x tx_stop:%04x tx_rx_gap:%03d total_byte:%04d\n",i,memcp_half[i],DMABlockSize, memcp_op_src_s[i],memcp_op_src_e[i],memcp_op_dst_s[i],memcp_op_dst_e[i], memcp_op_len[i],memcp_op_dst_s[i],memcp_op_dst_e[i], tx_rx_indx_gap,total_byte_written);
         for (int j=0;j<memcp_sub_indx[i];j++){
-          printf("   subop j:%02d type:%c src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d \n",j,memcp_op_sub_type[i][j], memcp_op_sub_src_s[i][j],memcp_op_sub_src_e[i][j],memcp_op_sub_dst_s[i][j],memcp_op_sub_dst_e[i][j], memcp_op_sub_len[i][j]);
-        
+          printf("cpy j:%02d type:%c src(s:%04d,e:%04d) => dst(s:%04d, e:%04d) l:%04d \n",j,memcp_op_sub_type[i][j], memcp_op_sub_src_s[i][j],memcp_op_sub_src_e[i][j],memcp_op_sub_dst_s[i][j],memcp_op_sub_dst_e[i][j], memcp_op_sub_len[i][j]);
         }
         printf("\n");
-      
       }
-
-      printf("WR_REQ Ends ktx:%d krx:%d IntTRK:%d [RX S:%d, E:%d ] [TX S:%d, E:%d] DMABlk:%d\n",keep_tx,keep_rx, intTrk,rx_start_indx,rx_end_indx,tx_start_indx,tx_end_indx,DMABlockSize);
-      dumpBuf(DMA_BIT_TX_BUFFER+keep_tx,1,512);
+      printf("WR_REQ Ends ktx:%d 0x%04x krx:%d 0x%04x IntTRK:%d [RX S:%d, E:%d ] [TX S:%d, E:%d] \n",keep_tx,keep_tx,keep_rx,  keep_rx,intTrk,keep_rx,rx_end_indx,keep_tx,tx_end_indx);
     }
 
-  }
-  
-  
-   else {
+  }else {
       __NOP();
   }
 }
@@ -2031,6 +2226,7 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+    printf("oups I'm fucked\n");
   }
   /* USER CODE END Error_Handler_Debug */
 }

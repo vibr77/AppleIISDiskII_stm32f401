@@ -9,7 +9,10 @@
 
 int getWozTrackFromPh(int phtrack);
 long getSDAddrWoz(int trk,int block,int csize, long database);
+
 enum STATUS getWozTrackBitStream(int trk,unsigned char * buffer);
+enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer);
+
 enum STATUS mountWozFile(char * filename);
 
 typedef struct woz_info_s {

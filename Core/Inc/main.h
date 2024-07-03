@@ -61,15 +61,19 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 enum page{FS,MOUNT,MENU,IMAGE};
-enum action{NONE,IMG_MOUNT,FSDISP};
+enum action{NONE,IMG_MOUNT,FSDISP,DUMP_TX,WRITE_TRK};
 enum STATUS{RET_OK,RET_ERR};
 
 void EnableTiming(void);
 void dumpBuf(unsigned char * buf,long memoryAddr,int len);
+enum STATUS dumpBufFile(char * filename,char * buffer,int length);
+enum STATUS writeTrkFile(char * filename,char * buffer,uint32_t offset);
+
 char *byte_to_binary(int x);
 
 enum STATUS cmd17GetDataBlockBareMetal(long memoryAdr,unsigned char *buffer);
 enum STATUS cmd18GetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,int count);
+enum STATUS cmd25SetDataBlocksBareMetal(long memoryAdr,unsigned char * buffer,int count);
 
 // HAL Interrupt function
 
@@ -87,7 +91,7 @@ enum STATUS walkDir(char * path);                                   // Build cha
 
 enum STATUS mountImagefile(char * filename);
 
-int isDiskIIDisable();
+//int isDiskIIDisable();
 void processBtnInterrupt(uint16_t GPIO_Pin);
 
 void processPrevFSItem();
@@ -100,7 +104,8 @@ void nothing();
 void processBtnRet();
 
 enum STATUS swithPage(enum page newPage,void * arg);
-void processDiskHeadMove(uint16_t GPIO_Pin);
+void processDiskHeadMoveInterrupt(uint16_t GPIO_Pin);
+char processDeviceEnableInterrupt(uint16_t GPIO_Pin);
 
 enum STATUS mountImagefile(char * filename);
 enum STATUS initeDMABuffering();
@@ -131,6 +136,7 @@ enum STATUS initeDMABuffering();
 #define STEP3_EXTI_IRQn EXTI3_IRQn
 #define DEVICE_ENABLE_Pin GPIO_PIN_4
 #define DEVICE_ENABLE_GPIO_Port GPIOA
+#define DEVICE_ENABLE_EXTI_IRQn EXTI4_IRQn
 #define SD_EJECT_Pin GPIO_PIN_7
 #define SD_EJECT_GPIO_Port GPIOA
 #define SD_EJECT_EXTI_IRQn EXTI9_5_IRQn

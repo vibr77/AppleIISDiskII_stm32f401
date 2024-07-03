@@ -13,6 +13,9 @@ import sys
 
 options.no_color=True
 
+
+
+
 def findDataFieldSignature(nibble: Bits):
     pattern="0xD5AAAD"
     lst=list(nibble.findall(pattern))
@@ -34,24 +37,28 @@ def findDataFieldSignature(nibble: Bits):
 
 
 def findAddrFieldSignature(nibble: Bits):
-    pattern="0b110101011010101010010110"
+    
     pattern="0xD5AA96"
     lst=list(nibble.findall(pattern))
+    print(nibble.length)
     last=0
     
     for item in lst:
         delta=item-last
-        delta_comp_8=delta+(8-delta%8)
-        #print("   data:"+pattern+" offset:"+repr(item)+" length:"+repr(delta)+" mod:"+repr(8-delta%8))
-        c=nibble.cut(bits=delta_comp_8,start=last,end=item+(8-delta%8))
+        delta_comp_8=delta-delta%8
+        print("   data:"+pattern+" offset:"+repr(item)+" length:"+repr(delta)+" mod:"+repr(8-delta%8))
+        c=nibble.cut(bits=delta_comp_8,start=last,end=item-delta%8)
+        #for nib in c:
+        #    nib.pp()
+
         last=item
-    delta=nibble.length-last
-    delta_b_comp=delta-delta%8
-    print("   data:"+pattern+" offset:"+repr(last)+" length:"+repr(delta_b_comp)+" mod:"+repr(8-delta%8))
-    c=nibble.cut(bits=delta_b_comp,start=last)
-    for nib in c:
-        #nib.pp()
-        findDataFieldSignature(nib)
+    #delta=nibble.length-last
+    #delta_b_comp=delta-delta%8
+    #print("   data:"+pattern+" offset:"+repr(last)+" length:"+repr(delta_b_comp)+" mod:"+repr(8-delta%8))
+    #c=nibble.cut(bits=delta_b_comp,start=last)
+    #for nib in c:
+    #    nib.pp()
+        #findDataFieldSignature(nib)
     #print("  Data 0xD5AA96 offset:"+repr(item)+" length:"+repr(delta))
 
     #print(list(nibble.findall('0xD5AA96')))
@@ -71,26 +78,126 @@ def checkExist(buffer,fileBuffer):
             return x
             break
     return -1
-def file2buf(NICname,buffer):
+
+#
+# Open file and create a byte buffer
+#
+def file2buf(NICname,dstBuffer):
     file = open(NICname, "rb")
     
     indx=0
-    # Reading the first three bytes from the binary file
     data = file.read(512)
     
-    # Printing data by iterating with while loop
     while data:
-        x=0
-        #for b in data:
-        buffer[indx*512:(indx*512)-1]=data
-        #x=x+1
+        dstBuffer[indx*512:(indx*512)-1]=data
         data = file.read(512)
         indx=indx+1
        
     # Close the binary file
     file.close()
-    #print(buffer)
 
+
+def processPattern(data:Bits,comp:Bits):
+    start=0
+    chunk=256
+    ex_chunk=8
+    outcome=[0]*8000
+    while start+chunk < 6656:
+        print("search chunk start:"+repr(start)+" chunk:"+repr(chunk))
+        flgFound=0
+        pattern=comp[start*8:start*8+chunk]
+        lst=data.findall(pattern)
+        for item in lst:
+            print("   found:"+repr(item))
+            flgFound=1
+        if flgFound==1:
+            while flgFound==1:
+                flgFound=0
+                chunk=chunk+ex_chunk
+                pattern=comp[start*8:start*8+chunk]
+                lst=data.findall(pattern)
+                for item in lst:
+                    print("      extend chunk:"+repr(chunk+ex_chunk))
+                    flgFound=1
+                    pos=item
+                
+                if flgFound==0:
+                    for i in range (start,start+chunk-ex_chunk):
+                        outcome[i]=pos
+
+
+                    print("      extend exit:"+repr(start+chunk)+" chunk:"+repr(chunk))
+            start=start+chunk
+            chunk=512
+        else:
+            print("not found")
+            for i in range (start,start+chunk):
+                outcome[i]=0
+            start=start+ex_chunk
+    myiter = iter(range(0, 6656))
+    subsize=0
+    tsize=0
+    for i in myiter:
+        if outcome[i]==0:
+            k=i
+            while outcome[i]==0:
+                i=i+1
+                next(myiter, None)
+                if i>6656:
+                    break
+            subsize=i-k
+            tsize=tsize+subsize   
+            print("not found chunk:"+repr(k)+"->"+repr(i)+" subsize:"+repr(subsize)+" tsize:"+repr(tsize))
+
+
+#
+# Decode the D5AA96 Address
+#
+
+def decodeAddr(buffer):
+    trk=0
+    c=buffer[5] & 0b01010101
+    trk=(c<<1) & 0b100000000 | (c<<2 & 0b01000000) | (c << 3 & 0b00100000) | (c<<4 & 0b00010000)
+    c=buffer[6] 
+    trk|=(c & 0b00000001) | (c>> 1 & 0b00000010) | (c>> 2 & 0b00000100) | (c >> 3 & 0b00001000)
+    print("track:"+repr(trk))
+    print("{0:b}".format(buffer[5]))
+    print("{0:b}".format(buffer[6]))
+    print("{0:b}".format(trk))
+
+    sector=0
+    c=buffer[7] & 0b01010101
+    sector=(c<<1) & 0b100000000 | (c<<2 & 0b01000000) | (c << 3 & 0b00100000) | (c<<4 & 0b00010000)
+    c=buffer[8] 
+    sector|=(c & 0b00000001) | (c>> 1 & 0b00000010) | (c>> 2 & 0b00000100) | (c >> 3 & 0b00001000)
+    print("sector:"+repr(sector))
+    print("{0:b}".format(buffer[7]))
+    print("{0:b}".format(buffer[8]))
+    print("{0:b}".format(sector))
+
+def processBuffer(s,pattern):
+    #pattern='0b11111111001111111100111111110011111111001111111100'
+    print("search bit pattern:"+pattern)
+    #pattern="0xDEAAEB"
+    last=0
+    indx=0
+    for item in list(s.findall(pattern,bytealigned=False)):
+        
+        delta=item-last
+        delta_comp_8=delta-delta%8
+           
+        if delta!=0:
+            print("   indx:"+repr(indx)+" offset:"+repr(item)+" (bits)  length:"+repr(delta)+" bits bytes:"+repr(delta/8))
+            #print(s[item:item+112])
+            s[item:item+112].pp()
+            #print("Prologue: "+repr(s[item+11*8:item+14*8].tobytes()))
+            #s[item+11*8:item+14*8].pp()
+            #c=s.cut(bits=delta_comp_8,start=last,end=item-(delta%8))
+            #for nibble in c:
+                #nibble.pp(width=120)
+                #findAddrFieldSignature(nibble)
+            indx=indx+1
+        last=item
 
 #print(pd.options.display.max_rows) 
 k=1
@@ -99,95 +206,50 @@ str=""
 sector=[0] * 512
 n = 16*35
 m = 512
-diskSector = [[0] * m] * n
 
-#file2buf(sys.argv[2],diskSector)
 
-filename = sys.argv[1]
-df = pd.read_csv(filename,sep = ';')
-niceSector=""
-pos=0
-buffer=bytearray(64000)
-pos=0
-for i, j in df.iterrows():
+
+
+#filename = sys.argv[1]
+#df = pd.read_csv(filename,sep = ';')
+
+#pos=0
+#buffer=bytearray(64000)
+#buffer2=bytearray(64000)
+
+#pos=0
+#for i, j in df.iterrows():
     #print(i, j)
-    #print(i)
-    str=str+repr(j[3])+" "
-    sector[l]=int(j[3],16)
-    buffer[pos]=int(j[3],16)
-    if k%16==0:
+#    str=str+repr(j[3])+" "
+
+#    buffer[pos]=int(j[3],16)
+#    if k%16==0:
         #print(str)
     #    niceSector=niceSector+str+"\n"
-        str=""
-    #if k%448==0:
-    #    print()
-    #    print()
-    #    print()
-    #    l=0
-    #    pos=pos+1
-    #    print(pos)
-        #res=checkExist(sector,diskSector)
-        #if res==-1:
-        #    print(niceSector)
-    #    niceSector=""
-    #else:
-    #    l=l+1
-    k=k+1
-    pos=pos+1
-
-#c = BitArray(buffer)
-
-
-
-
-s=Bits(buffer)
-print("total bits:"+repr((pos-1)*8))
-#print(list(s.findall('0b11111111001111111100111111110011111111001111111100')))
-#print(list(s.findall('0xD5AAAD')))
-#print(list(s.findall('0xD5AA96')))
-#print(s.startswith('0xD5AA96',start=66442))
-pattern='0b11111111001111111100111111110011111111001111111100'
-last=0
-for item in list(s.findall(pattern)):
-    
-    delta=item-last
-    delta_comp_8=delta+(8-delta%8)
-        
-    if delta>1024:
-        print("SyncBytes offset:"+repr(item)+" length:"+repr(delta))
-        c=s.cut(bits=delta_comp_8,start=last,end=item+(8-delta%8))
-        for nibble in c:
-            #nibble.pp(width=120)
-            findAddrFieldSignature(nibble)
-    #else:
-    #    print("oups:"+repr(delta))
-    
-    #length_1=408*8
-    
-    #c=s.cut(bits=delta,start=item,end=start_1)
-    
-    #for nibble in c:
-        #print(list(nibble.findall('0xD5AAAD')))
-        #nibble.pp(width=120)
-    last=item
-#c[0].pp(width=120)
-    #for nibble in c:
-        #nibble.pp('hex',width=120)
-#b=np.right_shift(buffer,4)
-#print(b);
-#myBytes=bytes([0xFF,0xAA,0x55])
-str=""
-k=0
-#for x in range (0,1024):
-#    str=str+hex(b[x])+" "
-#    if k%16==0 and k!=0:
-#        print(str)
-        #niceSector=niceSector+str+"\n"
 #        str=""
-    #print(hex(b[x]))
+    
 #    k=k+1
-#bits=int.from_bytes(buffer,byteorder="big")
-#bits=bits>>1
-#print(bits.to_bytes(3,byteorder="big"))
+#    pos=pos+1
 
-print("END\n")
+#xlBuffer=Bits(buffer)
+
+#file2buf(sys.argv[2],buffer2)
+#fs=Bits(buffer2)
+#print(fs.length)
+
+#print("total bits:"+repr((pos-1)*8))
+bArr=b'\xD5\xAA\x96\xFF\xFE\xAB\xAB\xAA\xAE'
+decodeAddr(bArr)
+#processPattern(fs,xlBuffer)
+#print("from RX_DMA:")
+#processBuffer(fs,"0xD5AA96")
+#processBuffer(fs,"0xDEAAEB")
+#print()
+#processBuffer(xlBuffer,"0xD5AA96")
+#processBuffer(xlBuffer,"0xDEAAEB")
+#print("Logic Analyzer:")
+#processBuffer(xlBuffer)
+
+
+
+

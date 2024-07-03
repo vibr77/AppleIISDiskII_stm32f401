@@ -7,7 +7,7 @@
 #include <stdio.h>
 uint16_t Timer1, Timer2;          /* 1ms Timer Counter */
 static volatile DSTATUS Stat = STA_NOINIT;  /* Disk Status */
-static uint8_t CardType;                    /* Type 0:MMC, 1:SDC, 2:Block addressing */
+uint8_t CardType;                           /* Type 0:MMC, 1:SDC, 2:Block addressing */
 static uint8_t PowerFlag = 0;       /* Power flag */
 /***************************************
  * SPI functions
@@ -112,34 +112,26 @@ __attribute__((optimize("-Ofast"))) static bool SD_RxDataBlockFast(BYTE *buff, U
   SPI_HandleTypeDef *hspi=&hspi2;
   uint32_t txallowed = 1U;
   
-  if ((hspi->Instance->CR1 & SPI_CR1_SPE) != SPI_CR1_SPE)
-  {
+  if ((hspi->Instance->CR1 & SPI_CR1_SPE) != SPI_CR1_SPE){
     /* Enable SPI peripheral */
     __HAL_SPI_ENABLE(hspi);
   }
   
-  //unsigned long t1,t2,diff,ll;
-  //ll=0;                                                               // Reset cpu cycle counter
- /* do {
-    token = SPI_RxByte();
-  } while((token == 0xFF) && Timer1);
-*/
- do{
+  do{
       if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
         *(__IO uint8_t *)&hspi->Instance->DR = 0xFF;
         txallowed = 0U;
       }
 
       if (__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_RXNE)){
-         token= hspi->Instance->DR;
-      
+        token= hspi->Instance->DR;
         txallowed = 1U;
       }
 
 	  }while((token == 0xFF) && Timer1);
 
- 
-  if(token != 0xFE) return FALSE;
+  if(token != 0xFE) 
+    return FALSE;
  
   do{
       if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
@@ -156,27 +148,18 @@ __attribute__((optimize("-Ofast"))) static bool SD_RxDataBlockFast(BYTE *buff, U
 
 	  }while(len);
 
-  
-
   /* Clear overrun flag in 2 Lines communication mode because received is not read */
-  if (hspi->Init.Direction == SPI_DIRECTION_2LINES)
-  {
+  if (hspi->Init.Direction == SPI_DIRECTION_2LINES){
     __HAL_SPI_CLEAR_OVRFLAG(hspi);
   }
 
-  
   hspi->State = HAL_SPI_STATE_READY;
 
+  /* discard CRC */
 
+  SPI_RxByte();
+  SPI_RxByte();
 
-    /* discard CRC */
-
-    SPI_RxByte();
-    SPI_RxByte();
-    
-  //  diff = t2 - t1;
-  // printf("ll=%ld\n",ll);
-  // printf("timelapse fastdata %ld cycles\n",diff);
   return TRUE;
 }
 
@@ -203,12 +186,37 @@ static bool SD_RxDataBlock(BYTE *buff, UINT len)
 }
 /* transmit data block */
 #if _USE_WRITE == 1
-static bool SD_TxDataBlock(const uint8_t *buff, BYTE token)
-{
+
+__attribute__((optimize("-Ofast"))) static bool SD_TxDataBlockFast(BYTE *buff, BYTE token){
   uint8_t resp=0;
   uint8_t i = 0;
-  /* wait SD ready */
-  if (SD_ReadyWait() != 0xFF) return FALSE;
+ 
+  uint8_t res;
+  /* timeout 500ms */
+  Timer2 = 500;                         // timer 2 timeout 500ms
+  SPI_HandleTypeDef *hspi=&hspi2;
+  uint32_t txallowed = 1U;
+  
+  if ((hspi->Instance->CR1 & SPI_CR1_SPE) != SPI_CR1_SPE){
+    __HAL_SPI_ENABLE(hspi);
+  }
+   /* wait SD ready */
+  do{
+    if ((__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_TXE)) && (txallowed == 1U)){
+      *(__IO uint8_t *)&hspi->Instance->DR = 0xFF;
+      txallowed = 0U;
+    }
+
+    if (__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_RXNE)){
+      res= hspi->Instance->DR;
+      txallowed = 1U;
+    }
+
+	}while((res == 0xFF) && Timer2);
+  
+  if (res != 0xFF) 
+    return FALSE;
+
   /* transmit token */
   SPI_TxByte(token);
   /* if it's not STOP token, transmit data */
@@ -233,6 +241,45 @@ static bool SD_TxDataBlock(const uint8_t *buff, BYTE token)
   if ((resp & 0x1F) == 0x05) return TRUE;
   return FALSE;
 }
+
+
+static bool SD_TxDataBlock(const uint8_t *buff, BYTE token)
+{
+  uint8_t resp=0;
+  uint8_t i = 0;
+  /* wait SD ready */
+  if (SD_ReadyWait() != 0xFF) 
+    return FALSE;
+  //printf("A1\n");
+  /* transmit token */
+  SPI_TxByte(token);
+  /* if it's not STOP token, transmit data */
+  if (token != 0xFD)
+  {
+    SPI_TxBuffer((uint8_t*)buff, 512);
+    /* discard CRC */
+    SPI_RxByte();
+    SPI_RxByte();
+    /* receive response */
+    while (i <= 64)
+    {
+      resp = SPI_RxByte();
+      /* transmit 0x05 accepted */
+      if ((resp & 0x1F) == 0x05) break;
+      i++;
+    }
+    /* recv buffer clear */
+    while (SPI_RxByte() == 0);
+  }
+  //printf("A2\n");
+  /* transmit 0x05 accepted */
+  if ((resp & 0x1F) == 0x05) 
+    return TRUE;
+  //printf("A3\n");
+  
+  return FALSE;
+}
+
 #endif /* _USE_WRITE */
 /* transmit command */
 static BYTE SD_SendCmd(BYTE cmd, uint32_t arg)
@@ -277,6 +324,15 @@ bool getSDDataBlock(BYTE *buff, UINT len){
 bool getSDDataBlockBareMetal(BYTE *buff, UINT len){
   return SD_RxDataBlockFast(buff, len);
 }
+
+bool setSDDataBlockBareMetal(BYTE *buff, BYTE token){
+  return SD_TxDataBlock(buff, token);
+}
+
+bool writeDataBlocks( const BYTE* buff, DWORD sector, UINT count){
+  return SD_disk_write(0, buff, sector, count);
+}
+
 
 DSTATUS SD_disk_initialize(BYTE drv)
 {
@@ -379,7 +435,7 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE* buff, DWORD sector, UINT count)
   {
     /* READ_SINGLE_BLOCK */
     if ((SD_SendCmd(CMD17, sector) == 0) && SD_RxDataBlock(buff, 512)) count = 0;
-      printf("inside sector %ld\n",sector);
+      //printf("inside sector %ld\n",sector);
   }
   else
   {
@@ -397,6 +453,7 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE* buff, DWORD sector, UINT count)
   /* Idle */
   DESELECT();
   SPI_RxByte();
+  
   return count ? RES_ERROR : RES_OK;
 }
 /* write sector */
@@ -410,7 +467,11 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count)
   /* write protection */
   if (Stat & STA_PROTECT) return RES_WRPRT;
   /* convert to byte address */
-  if (!(CardType & CT_SD2)) sector *= 512;
+  if (!(CardType & CT_SD2)){
+    sector *= 512;
+    //printf("what the fuck\n");
+  }
+  //printf("pdrv=%d\n",pdrv);  
   SELECT();
   if (count == 1)
   {
@@ -425,6 +486,7 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count)
     {
       SD_SendCmd(CMD55, 0);
       SD_SendCmd(CMD23, count); /* ACMD23 */
+      //printf("bousouk=%d",count);
     }
     if (SD_SendCmd(CMD25, sector) == 0)
     {
@@ -442,6 +504,7 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE* buff, DWORD sector, UINT count)
   /* Idle */
   DESELECT();
   SPI_RxByte();
+ // printf("count=%d",count);
   return count ? RES_ERROR : RES_OK;
 }
 #endif /* _USE_WRITE */

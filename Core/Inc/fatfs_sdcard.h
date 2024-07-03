@@ -3,7 +3,8 @@
 uint8_t getSDCMD(BYTE cmd, uint32_t arg);
 bool getSDDataBlock(BYTE *buff, UINT len);
 bool getSDDataBlockBareMetal(BYTE *buff, UINT len);
-
+bool setSDDataBlockBareMetal(BYTE *buff, BYTE token);
+bool writeDataBlocks( const BYTE* buff, DWORD sector, UINT count);
 
 #ifndef __FATFS_SD_H
 #define __FATFS_SD_H

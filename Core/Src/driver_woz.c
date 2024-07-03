@@ -12,9 +12,11 @@ __uint8_t TMAP[160];
 __uint16_t BLK_startingBlocOffset[160];
 woz_info_t wozFile;
 
+
 extern long database;                                            // start of the data segment in FAT
 extern int csize;  
 unsigned int fatWozCluster[20];
+char * woz1_256B_prologue;                                       // needed to store the potential overwrite 
 
 int getWozTrackFromPh(int phtrack){
    return TMAP[phtrack];
@@ -57,6 +59,38 @@ enum STATUS getWozTrackBitStream(int trk,unsigned char * buffer){
 
     cmd18GetDataBlocksBareMetal(addr,tmp2,blockNumber+1);
     memcpy(buffer,tmp2+256,blockNumber*512-10);                                       // Last 10 Bytes are not Data Stream Bytes
+    woz1_256B_prologue=malloc(256*sizeof(char));
+    memcpy(woz1_256B_prologue,tmp2,256);                                              // we need this to speed up the write process
+    free(tmp2);
+  }
+        
+  return 1;
+}
+
+enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer){
+  const unsigned int blockNumber=13; 
+  int addr=getSDAddrWoz(trk,0,csize,database);
+  
+  if (addr==-1){
+    printf("Error getting SDCard Address for woz\n");
+    return RET_ERR;
+  }
+  
+  if (wozFile.version==2){
+    writeDataBlocks(addr,buffer,blockNumber);
+    //cmd25SetDataBlocksBareMetal(addr,buffer,blockNumber);
+  }else if (wozFile.version==1){
+    
+    unsigned char * tmp2=(unsigned char*)malloc(14*512*sizeof(char));
+    if (tmp2==NULL){
+      printf("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes");
+      return RET_ERR;
+    }
+
+    // First we need to get the first 256 bytes of t
+    memcpy(tmp2,woz1_256B_prologue,256);
+    memcpy(tmp2+256,buffer,blockNumber*512);   
+    cmd25SetDataBlocksBareMetal(addr,tmp2,blockNumber+1);               // <!> Last 10 Bytes are not Data Stream Bytes
     free(tmp2);
   }
         
@@ -164,7 +198,7 @@ enum STATUS mountWozFile(char * filename){
         free(trk_chunk);
     }else{
         printf("woz file type 1 no trk_chunk\n");
-        return RET_ERR;
+        //return RET_OK;
     }
 
     f_close(&fil);
