@@ -37,7 +37,10 @@ BUILD_DIR = build
 # C sources
 C_SOURCES =  \
 Core/Src/main.c \
-Core/Src/woz.c \
+Core/Src/log.c \
+Core/Src/driver_nic.c \
+Core/Src/driver_woz.c \
+Core/Src/log.c \
 Core/Src/display.c \
 Core/Src/parson.c \
 Core/Src/configFile.c \

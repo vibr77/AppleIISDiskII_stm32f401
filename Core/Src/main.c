@@ -79,6 +79,8 @@ SPI:
 #include "driver_woz.h"
 #include "driver_nic.h"
 #include "configFile.h"
+#include "log.h"
+
 //#include "parson.h"
 /* USER CODE END Includes */
 
@@ -89,9 +91,7 @@ SPI:
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#undef TIM2_PERIOD
-#define TIM2_PERIOD 72-1
-#define CPU_FREQ    72
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -147,11 +147,12 @@ volatile int ph_track=0;                                    // SDISK Physical tr
 volatile int intTrk=0;                                      // InterruptTrk                                    
 unsigned char prevTrk=0;                                    // prevTrk to keep track of the last head track
 
-unsigned int DMABlockSize=6656;//6592; // 6656        // Size of the DMA Buffer => full track width with 13 block of 512
-unsigned char read_track_data_bloc[19968];                   // 3 adjacent track of 13 bloc of 512
+unsigned int DMABlockSize=6464;//6592; // 6656              // Size of the DMA Buffer => full track width with 13 block of 512
+unsigned int RawSDTrackSize=6656;                           // Maximuum track size on NIC & WOZ to load from SD
+unsigned char read_track_data_bloc[19968];                  // 3 adjacent track 3 x RawSDTrackSize
   
-unsigned char DMA_BIT_TX_BUFFER[6656];                         // DMA Buffer from the SPI
-unsigned char DMA_BIT_RX_BUFFER[6656];                         // DMA Buffer from the SPI
+unsigned char DMA_BIT_TX_BUFFER[6656];                      // DMA Buffer from the SPI
+unsigned char DMA_BIT_RX_BUFFER[6656];                      // DMA Buffer from the SPI
 unsigned char dump_rx_buffer[6656]; 
 unsigned int woz_block_sel_012=0;                           // current index of the current track related to woz_track_data_bloc[3][6656];
 int woz_sel_trk[3];                                         // keep track number in the selctor
@@ -271,12 +272,24 @@ enum STATUS writeTrkFile(char * filename,char * buffer,uint32_t offset){
   UINT bytesWrote;
   UINT totalBytes=0;
 
-  for (int i=0;i<13;i++){
+  int blk=(DMABlockSize/512);
+  int lst_blk_size=DMABlockSize%512;
+
+  for (int i=0;i<blk;i++){
     fres = f_write(&fil, buffer+i*512, 512, &bytesWrote);
     if(fres == FR_OK) {
       totalBytes+=bytesWrote;
     }else{
 	    printf("f_write error (%i)\n",fres);
+      return RET_ERR;
+    }
+  }
+  if (lst_blk_size!=0){
+    fres = f_write(&fil, buffer+blk*512, lst_blk_size, &bytesWrote);
+    if(fres == FR_OK) {
+      totalBytes+=bytesWrote;
+    }else{
+      printf("f_write error (%i)\n",fres);
       return RET_ERR;
     }
   }
@@ -1153,7 +1166,7 @@ enum STATUS mountImagefile(char * filename){
   if (l>4 && 
       (!memcmp(filename+(l-4),"\x2E\x4E\x49\x43",4)  ||           // .NIC
        !memcmp(filename+(l-4),"\x2E\x6E\x69\x63",4))){            // .nic
-     DMABlockSize=16*416;
+     //DMABlockSize=16*416;
      if (mountNicFile(filename)!=RET_OK)
         return RET_ERR;
     
@@ -1163,7 +1176,7 @@ enum STATUS mountImagefile(char * filename){
   }else if (l>4 && 
       (!memcmp(filename+(l-4),"\x2E\x57\x4F\x5A",4)  ||           // .WOZ
        !memcmp(filename+(l-4),"\x2E\x77\x6F\x7A",4))) {           // .woz
-    DMABlockSize=13*512;
+    //DMABlockSize=13*512;
     if (mountWozFile(filename)!=RET_OK)
       return RET_ERR;
 
@@ -1171,12 +1184,12 @@ enum STATUS mountImagefile(char * filename){
     getTrackBitStream=getWozTrackBitStream;
     setTrackBitStream=setWozTrackBitStream;
     getTrackFromPh=getWozTrackFromPh;
-    printf("seem good\n");
+    
   }else{
     return RET_ERR;
   }
 
-  printf("Mount OK\n");
+  printf("Mount image:OK\n");
   flgImageMounted=1;
   return RET_OK;
 }
@@ -1190,9 +1203,8 @@ enum STATUS initeDMABuffering(){
   HAL_SPI_DMAStop(&hspi1); 
   flgBeaming=0;
   memset(DMA_BIT_TX_BUFFER,0,sizeof(char)*DMABlockSize);
-  memset(DMA_BIT_TX_BUFFER,0,sizeof(char)*8192);
   memset(DMA_BIT_RX_BUFFER,0,sizeof(char)*DMABlockSize);
-  memset(read_track_data_bloc,0,sizeof(char)*3*DMABlockSize);
+  memset(read_track_data_bloc,0,sizeof(char)*3*RawSDTrackSize);
 
   for (int i=0;i<3;i++){
     woz_sel_trk[i]=-1;
@@ -1202,10 +1214,10 @@ enum STATUS initeDMABuffering(){
   getTrackBitStream(0,read_track_data_bloc);
   woz_sel_trk[0]=0; 
       
-  getTrackBitStream(1,read_track_data_bloc+DMABlockSize);
+  getTrackBitStream(1,read_track_data_bloc+RawSDTrackSize);
   woz_sel_trk[1]=1;
 
-  getTrackBitStream(2,read_track_data_bloc+2*DMABlockSize);
+  getTrackBitStream(2,read_track_data_bloc+2*RawSDTrackSize);
   woz_sel_trk[2]=2; 
  
   printf("start PrevTrk=%d; intTrk=%d\n",prevTrk,intTrk);
@@ -1319,9 +1331,9 @@ int main(void)
   //if (mountImagefile("FT.woz")!=RET_OK){
     
     
-    //if (mountImagefile("/Blank.woz")!=RET_OK){
+    if (mountImagefile("/Blank.woz")!=RET_OK){
     
-    if (mountImagefile("Locksmithcrk.nic")!=RET_OK){
+    //if (mountImagefile("Locksmithcrk.nic")!=RET_OK){
       printf("Mount Image Error\n");
     }
   
@@ -1405,13 +1417,13 @@ int main(void)
 
       if (f!=1){
         woz_block_sel_012=1;
-        getTrackBitStream(trk,read_track_data_bloc+woz_block_sel_012*DMABlockSize);
+        getTrackBitStream(trk,read_track_data_bloc+woz_block_sel_012*RawSDTrackSize);
         woz_sel_trk[1]=trk;
           
       }
       //printf("A1\n");
 
-      memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc+woz_block_sel_012*DMABlockSize,DMABlockSize);      // copy the new track data to the DMA Buffer
+      memcpy(DMA_BIT_TX_BUFFER,read_track_data_bloc+woz_block_sel_012*RawSDTrackSize,DMABlockSize);      // copy the new track data to the DMA Buffer
       HAL_SPI_DMAResume(&hspi1); 
       //dumpBuf(DMA_BIT_TX_BUFFER,666,512);
       //t2 = DWT->CYCCNT;
@@ -1429,7 +1441,7 @@ int main(void)
         fp1=1;
       }
       else if (trk!=35 && woz_sel_trk[selP1]!=(trk+1)){                                           // check if we need to load the track above                                                     
-        getTrackBitStream(trk+1,read_track_data_bloc+selP1*DMABlockSize);     
+        getTrackBitStream(trk+1,read_track_data_bloc+selP1*RawSDTrackSize);     
         woz_sel_trk[selP1]=(trk+1);                                                               // change the trk in the selector
       }
      //printf("A2\n");
@@ -1437,7 +1449,7 @@ int main(void)
         fm1=1;
       }
       else if (trk!=0 && woz_sel_trk[selM1]!=(trk-1)){                                            // check if we need to load the track above
-        getTrackBitStream(trk-1,read_track_data_bloc+selM1*DMABlockSize);     
+        getTrackBitStream(trk-1,read_track_data_bloc+selM1*RawSDTrackSize);     
         woz_sel_trk[selM1]=(trk-1);                                                               // change the trk in the selector
       }
       //printf("A3\n");
@@ -2182,8 +2194,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
       
       memcp_indx++;
       
-      nextAction=DUMP_TX;
-      //nextAction=WRITE_TRK;
+      //nextAction=DUMP_TX;
+      nextAction=WRITE_TRK;
       p++;
       for (int i=0;i<memcp_indx;i++){
         printf("cpy i:%02d half:%d BlocSize:%d src(s:%04d,e:%04d) => dst(s:%04d,e:%04d) l:%04d  tx_start:0x%04x tx_stop:%04x tx_rx_gap:%03d total_byte:%04d\n",i,memcp_half[i],DMABlockSize, memcp_op_src_s[i],memcp_op_src_e[i],memcp_op_dst_s[i],memcp_op_dst_e[i], memcp_op_len[i],memcp_op_dst_s[i],memcp_op_dst_e[i], tx_rx_indx_gap,total_byte_written);

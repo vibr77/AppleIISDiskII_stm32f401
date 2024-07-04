@@ -8,6 +8,7 @@
 
 #include "driver_nic.h"
 #include "main.h"
+#include "log.h"
 
 extern long database;                                            // start of the data segment in FAT
 extern int csize;  
@@ -41,9 +42,10 @@ enum STATUS getNicTrackBitStream(int trk,unsigned  char* buffer){
 
   cmd18GetDataBlocksBareMetal(addr,tmp2,16);
 
+  // 22xFF are not needed,
+  // Right size is 404 Bytes => offset 6 athe begining 
   for (int i=0;i<16;i++){
-
-    memcpy(buffer+i*416,tmp2+i*512,416);
+    memcpy(buffer+i*404 /*416*/ ,tmp2+i*512+6,/*416*/ 404);
   }
   free(tmp2);
   return RET_OK;

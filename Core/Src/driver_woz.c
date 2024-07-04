@@ -7,11 +7,13 @@
 
 #include "driver_woz.h"
 #include "main.h"
+#include "log.h"
 
 __uint8_t TMAP[160];
 __uint16_t BLK_startingBlocOffset[160];
 woz_info_t wozFile;
 
+const char logPrefix[]="[woz_driver]";
 
 extern long database;                                            // start of the data segment in FAT
 extern int csize;  
@@ -44,16 +46,16 @@ enum STATUS getWozTrackBitStream(int trk,unsigned char * buffer){
   int addr=getSDAddrWoz(trk,0,csize,database);
   
   if (addr==-1){
-    printf("Error getting SDCard Address for woz\n");
+    printf("%s:Error getting SDCard Address for woz\n",logPrefix);
     return RET_ERR;
   }
   
   if (wozFile.version==2){
     cmd18GetDataBlocksBareMetal(addr,buffer,blockNumber);
   }else if (wozFile.version==1){
-    unsigned char * tmp2=(unsigned char*)malloc(14*512*sizeof(char));
+    unsigned char * tmp2=(unsigned char*)malloc((blockNumber+1)*512*sizeof(char));
     if (tmp2==NULL){
-      printf("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes");
+      printf("%s:Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes",logPrefix);
       return RET_ERR;
     }
 
@@ -72,7 +74,7 @@ enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer){
   int addr=getSDAddrWoz(trk,0,csize,database);
   
   if (addr==-1){
-    printf("Error getting SDCard Address for woz\n");
+    printf("%s:Error getting SDCard Address for woz\n",logPrefix);
     return RET_ERR;
   }
   
@@ -83,7 +85,7 @@ enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer){
     
     unsigned char * tmp2=(unsigned char*)malloc(14*512*sizeof(char));
     if (tmp2==NULL){
-      printf("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes");
+      printf("%s:Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes",logPrefix);
       return RET_ERR;
     }
 
@@ -104,14 +106,14 @@ enum STATUS mountWozFile(char * filename){
 
     fres = f_open(&fil,filename , FA_READ);    
     if(fres != FR_OK){
-        printf("File open Error: (%i)\r\n", fres);
+        printf("%s:File open Error: (%i)\r\n", logPrefix,fres);
         return RET_ERR;
     } 
 
     long clusty=fil.obj.sclust;
     int i=0;
     fatWozCluster[i]=clusty;
-    printf("file cluster %d:%ld\n",i,clusty);
+    printf("%s:file cluster %d:%ld\n",logPrefix,i,clusty);
   
     while (clusty!=1 && i<30){
         i++;
@@ -123,10 +125,10 @@ enum STATUS mountWozFile(char * filename){
     char * woz_header=(char*)malloc(4*sizeof(char));
     f_read(&fil,woz_header,4,&pt);
     if (!memcmp(woz_header,"\x57\x4F\x5A\x31",4)){               //57 4F 5A 31
-        printf("woz version 1\n");
+        printf("Image:woz version 1\n");
         wozFile.version=1;
     }else if (!memcmp(woz_header,"\x57\x4F\x5A\x32",4)){
-        printf("woz version 2\n");
+        printf("Image:woz version 2\n");
         wozFile.version=2;
     }else{
         printf("Error: not a woz file\n");
@@ -148,7 +150,7 @@ enum STATUS mountWozFile(char * filename){
         memcpy(wozFile.creator,info_chunk+5,32);
         
     }else{
-        printf("Error Info Chunk is not valid\n");
+        printf("woz:Error Info Chunk is not valid\n");
         return RET_ERR;
     }
     free(info_chunk);

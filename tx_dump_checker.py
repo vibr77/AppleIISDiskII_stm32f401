@@ -103,21 +103,28 @@ def findAddrFieldSignature(nibble: Bits,pattern,endPattern,absOffset,ref):
     indx=0
     for item in lst:
         delta=item-last
-        addr=nibble[last:last+112].tobytes()
-        ret=decodeAddr(addr)
-        c=nibble.cut(bits=delta,start=last,end=item)
-        for nib in c:
-            endLst=list(nib.findall(endPattern))
-            endItem=0
-            for endItem in endLst:
-                break
+        if nibble[last:last+24].tobytes()!=b'\xd5\xaa\x96':                                         # If Signature is not present first part of the segment
+            print("trailling of the sector at the end of the disk s:"+repr(last)+" end:"+repr(item)+" "+hex(int(item/8))+".H length:"+repr(delta)+".b "+repr(delta/8)+".B bit shift:"+repr(item%8))             
+        else:            
+            addr=nibble[last:last+112].tobytes()
+            ret=decodeAddr(addr)
+            
+            c=nibble.cut(bits=delta,start=last,end=item)
+            for nib in c:
+                endLst=list(nib.findall(endPattern))
+                endItem=0
+                for endItem in endLst:
+                    break
         
-        length=endItem+len(endPattern)*8
-        newOffset=absOffset+item
-        print("_________________________________________________________________________________________________")
-        
-        print("Indx:{0:02d}".format(indx)+" pattern:"+pattern+" Addr: "+" ".join('{:02X}'.format(x) for x in addr[0:9])+" Track:{0:02d}".format(ret[0])+" sector:{0:02d}".format(ret[1])+" offset:{0:05d}".format(newOffset)+".b {0:05d}".format(int(newOffset/8))+".B "+hex(int(newOffset/8))+".H length:{0:03d}".format(length)+".b "+repr(length/8)+".B")
-        findDataFieldSignature(nib,"0xD5AAAD","0xDEAAEB",newOffset,ret[1],ref)
+            if c:
+
+                length=endItem+len(endPattern)*8
+                newOffset=absOffset+item
+                print("_________________________________________________________________________________________________")
+            
+                print("Indx:{0:02d}".format(indx)+" pattern:"+pattern+" Addr: "+" ".join('{:02X}'.format(x) for x in addr[0:9])+" Track:{0:02d}".format(ret[0])+" sector:{0:02d}".format(ret[1])+" offset:{0:05d}".format(newOffset)+".b {0:05d}".format(int(newOffset/8))+".B {0:04X}".format(int(newOffset/8))+".H length:{0:03d}".format(length)+".b "+repr(length/8)+".B")
+                findDataFieldSignature(nib,"0xD5AAAD","0xDEAAEB",newOffset,ret[1],ref)
+            
         last=item
         indx=indx+1
     
@@ -132,13 +139,14 @@ def findAddrFieldSignature(nibble: Bits,pattern,endPattern,absOffset,ref):
         for endItem in endLst:
             break
         break
-    length=endItem+len(endPattern)*8
-    newOffset=absOffset+item
-    newOffetEnd=absOffset+item+length
-    print("_________________________________________________________________________________________________")
+    if not endItem:
+        length=endItem+len(endPattern)*8
+        newOffset=absOffset+item
+        newOffetEnd=absOffset+item+length
+        print("_________________________________________________________________________________________________")
         
-    print("Indx:{0:02d}".format(indx)+" pattern:"+pattern+" Addr: "+" ".join('{:02X}'.format(x) for x in addr[0:9])+" Track:{0:02d}".format(ret[0])+" sector:{0:02d}".format(ret[1])+" offset:{0:05d}".format(newOffset)+".b {0:05d}".format(int(newOffset/8))+".B "+hex(int(newOffset/8))+".H end:"+hex(int(newOffetEnd/8))+".H length:{0:03d}".format(length)+".b "+repr(int(length/8))+".B")
-    findDataFieldSignature(nib,"0xD5AAAD","0xDEAAEB",newOffset,ret[1],ref)
+        print("Indx:{0:02d}".format(indx)+" pattern:"+pattern+" Addr: "+" ".join('{:02X}'.format(x) for x in addr[0:9])+" Track:{0:02d}".format(ret[0])+" sector:{0:02d}".format(ret[1])+" offset:{0:05d}".format(newOffset)+".b {0:05d}".format(int(newOffset/8))+".B {0:04X}".format(int(newOffset/8))+".H end:"+hex(int(newOffetEnd/8))+".H length:{0:03d}".format(length)+".b "+repr(int(length/8))+".B")
+        findDataFieldSignature(nib,"0xD5AAAD","0xDEAAEB",newOffset,ret[1],ref)
         
     print()
 
@@ -181,11 +189,11 @@ def findDataFieldSignature(nibble: Bits,pattern,endPattern,absOffset,sector,ref)
         
             print("   Indx:{0:02d}".format(indx)+" pattern:"+pattern+" offset:{0:05d}".format(newOffset)+".b {0:05d}".format(int(newOffset/8))+".B "+hex(int(newOffset/8))+".H end:"+hex(int(newOffetEnd/8))+".H length:{0:03d}".format(length)+".b "+repr(int(length/8))+".B")
         print()
-        nib.pp(width=200)    
+        #nib.pp(width=200)    
         last=item
         indx=indx+1
         break       
-    print()
+    #print()
 
 
 
@@ -218,6 +226,21 @@ def file2buf(NICname,buf):
         data = file.read(512)
         indx=indx+1
         if indx>16:
+            break
+
+
+def woz2buf(WOZname,buf,track):
+    file = open(WOZname, "rb")
+    file.seek(1536+track*6656)
+    indx=0
+    # Reading the first three bytes from the binary file
+    data = file.read(512)
+    
+    while data:
+        buf[indx*512:(indx*512)-1]=data
+        data = file.read(512)
+        indx=indx+1
+        if indx>12:
             break
 
 def nic2buf(NICname,buf,track):
@@ -265,7 +288,8 @@ arr_indx_ref=[]
 buffer=bytearray()
 
 #buffer=csv2buf(sys.argv[1],buffer)
-file2buf(sys.argv[1],buffer)
+woz2buf(sys.argv[1],buffer,1)
+#file2buf(sys.argv[1],buffer)
 s=Bits(buffer)
 #s.pp()
 
@@ -288,9 +312,9 @@ indx=0
 findPattern(s,"0xD5AA96","0xDEAAEB",0)
 
 
-
-#findAddrFieldSignature(s,"0xD5AA96","0xDEAAEB",0,0)
 '''
+findAddrFieldSignature(s,"0xD5AA96","0xDEAAEB",0,0)
+
 print("----------------------------------------------------------")
 print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
 print("----------------------------------------------------------")
@@ -321,13 +345,13 @@ for i in indx_ref:
                     break
 
             if match==1:
-                print("found matching Sector: src pos:"+repr(inx)+" ref pos:"+repr(i))
+                print("found matching sector:"+repr(i)+" src pos:"+repr(inx)+" ref pos:"+repr(i))
             else:
-                print("found Non matching Sector:"+repr(i)+" first error in src pos:"+repr(ii/8))
-                print("SRC:")
-                c1.pp(width=200)
-                print("REF:")
-                c2.pp(width=200) 
+                print("found Non matching sector:"+repr(i)+" first error in src pos:"+repr(ii/8))
+                #print("SRC:")
+                #c1.pp(width=200)
+                #print("REF:")
+                #c2.pp(width=200) 
 
             break
         inx=inx+1
