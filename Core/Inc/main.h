@@ -106,6 +106,7 @@ void processBtnRet();
 enum STATUS swithPage(enum page newPage,void * arg);
 void processDiskHeadMoveInterrupt(uint16_t GPIO_Pin);
 char processDeviceEnableInterrupt(uint16_t GPIO_Pin);
+char processSdEject(uint16_t GPIO_PIN);
 
 enum STATUS mountImagefile(char * filename);
 enum STATUS initeDMABuffering();

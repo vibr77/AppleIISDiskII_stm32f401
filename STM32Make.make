@@ -36,18 +36,22 @@ BUILD_DIR = build
 ######################################
 # C sources
 C_SOURCES =  \
+Core/Src/configFile.c \
 Core/Src/display.c \
+Core/Src/driver_nic.c \
+Core/Src/driver_woz.c \
 Core/Src/fatfs_sdcard.c \
 Core/Src/list.c \
 Core/Src/list_iterator.c \
 Core/Src/list_node.c \
+Core/Src/log.c \
 Core/Src/main.c \
+Core/Src/parson.c \
 Core/Src/stm32f4xx_hal_msp.c \
 Core/Src/stm32f4xx_it.c \
 Core/Src/syscalls.c \
 Core/Src/sysmem.c \
 Core/Src/system_stm32f4xx.c \
-Core/Src/woz.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c \

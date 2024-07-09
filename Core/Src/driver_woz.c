@@ -27,15 +27,19 @@ int getWozTrackFromPh(int phtrack){
 long getSDAddrWoz(int trk,int block,int csize, long database){
   long rSector=-1;
   if (wozFile.version==2){
-    int long_sector = BLK_startingBlocOffset[trk] + block;
+    //int long_sector = BLK_startingBlocOffset[trk] + block;
+    int long_sector=3+trk*13;
+    log_debug("long_sector: %d",long_sector);
     int long_cluster = long_sector >> 6;
     int ft = fatWozCluster[long_cluster];
     rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+
   }else if (wozFile.version==1){
     int long_sector = 13*trk;                                // 13 block of 512 per track
     int long_cluster = long_sector >> 6;
     int ft = fatWozCluster[long_cluster];
     rSector=database+(ft-2)*csize+(long_sector & (csize-1));
+  
   }
   
   return rSector;
@@ -52,10 +56,11 @@ enum STATUS getWozTrackBitStream(int trk,unsigned char * buffer){
   
   if (wozFile.version==2){
     cmd18GetDataBlocksBareMetal(addr,buffer,blockNumber);
+
   }else if (wozFile.version==1){
     unsigned char * tmp2=(unsigned char*)malloc((blockNumber+1)*512*sizeof(char));
     if (tmp2==NULL){
-      printf("%s:Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes",logPrefix);
+      log_error("Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes",logPrefix);
       return RET_ERR;
     }
 
@@ -74,7 +79,7 @@ enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer){
   int addr=getSDAddrWoz(trk,0,csize,database);
   
   if (addr==-1){
-    printf("%s:Error getting SDCard Address for woz\n",logPrefix);
+    log_error("Error getting SDCard Address for woz");
     return RET_ERR;
   }
   
@@ -85,7 +90,7 @@ enum STATUS setWozTrackBitStream(int trk,unsigned char * buffer){
     
     unsigned char * tmp2=(unsigned char*)malloc(14*512*sizeof(char));
     if (tmp2==NULL){
-      printf("%s:Error memory alloaction getNicTrackBitStream: tmp2:8192 Bytes",logPrefix);
+      log_error("Error memory alloaction getNicTrackBitStream: tmp2:7168 Bytes");
       return RET_ERR;
     }
 
@@ -106,14 +111,14 @@ enum STATUS mountWozFile(char * filename){
 
     fres = f_open(&fil,filename , FA_READ);    
     if(fres != FR_OK){
-        printf("%s:File open Error: (%i)\r\n", logPrefix,fres);
+        log_error("File open Error: (%i)",fres);
         return RET_ERR;
     } 
 
     long clusty=fil.obj.sclust;
     int i=0;
     fatWozCluster[i]=clusty;
-    printf("%s:file cluster %d:%ld\n",logPrefix,i,clusty);
+    log_info("file cluster %d:%ld",i,clusty);
   
     while (clusty!=1 && i<30){
         i++;
@@ -125,13 +130,13 @@ enum STATUS mountWozFile(char * filename){
     char * woz_header=(char*)malloc(4*sizeof(char));
     f_read(&fil,woz_header,4,&pt);
     if (!memcmp(woz_header,"\x57\x4F\x5A\x31",4)){               //57 4F 5A 31
-        printf("Image:woz version 1\n");
+        log_info("Image:woz version 1");
         wozFile.version=1;
     }else if (!memcmp(woz_header,"\x57\x4F\x5A\x32",4)){
-        printf("Image:woz version 2\n");
+        log_info("Image:woz version 2");
         wozFile.version=2;
     }else{
-        printf("Error: not a woz file\n");
+        log_error("Error: not a woz file");
         return RET_ERR;
     }
     free(woz_header);
@@ -150,7 +155,7 @@ enum STATUS mountWozFile(char * filename){
         memcpy(wozFile.creator,info_chunk+5,32);
         
     }else{
-        printf("woz:Error Info Chunk is not valid\n");
+        log_error("Error woz info Chunk is not valid");
         return RET_ERR;
     }
     free(info_chunk);
@@ -167,10 +172,10 @@ enum STATUS mountWozFile(char * filename){
     if (!memcmp(tmap_chunk,"\x54\x4D\x41\x50",4)){          // 0x50414D54          
         for (int i=0;i<160;i++){
             TMAP[i]=tmap_chunk[i+8];
-            //printf("debug tmap %03d: %02d\n",i,TMAP[i]);
+            log_debug("woz TMAP %03d: %02d",i,TMAP[i]);
         }
     }else{
-        printf("Error tmp Chunk is not valid\n");
+        log_error("Error tmp Chunk is not valid");
         free(tmap_chunk);
         return RET_ERR;
     }
@@ -189,17 +194,17 @@ enum STATUS mountWozFile(char * filename){
 
             for (int i=0;i<160;i++){
                 BLK_startingBlocOffset[i]=(((unsigned short)trk_chunk[i*8+8+1] << 8) & 0xF00) | trk_chunk[i*8+8];
-                //printf("debug blk starting bloc %03d: %02d\n",i,BLK_startingBlocOffset[i]);
+                log_debug("woz trk file offset trk:%03d offset:%02dx512",i,BLK_startingBlocOffset[i]);
             }
         }else{
-            printf("Error trk Chunk is not valid\n");
+            log_error("Error trk Chunk is not valid\n");
             free(trk_chunk);
             return RET_ERR;
         }
 
         free(trk_chunk);
     }else{
-        printf("woz file type 1 no trk_chunk\n");
+        log_error("woz file type 1 no trk_chunk\n");
         //return RET_OK;
     }
 

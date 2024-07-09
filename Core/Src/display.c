@@ -173,6 +173,14 @@ void initIMAGEScreen(char * imageName,int type){
   ssd1306_UpdateScreen();
 }
 
+void initSdEjectScreen(){
+
+  clearScreen();
+  displayStringAtPosition(5,1*9, "SD CARD IS EJECTED");
+  ssd1306_UpdateScreen();
+  
+}
+
 void initFSScreen(char * path){
 
   ssd1306_FillRectangle(0,0,127,63,Black);                // Erase current screen  

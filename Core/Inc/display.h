@@ -8,7 +8,7 @@ void initScreen();
 void clearScreen();
 void initFSScreen(char * path);
 void initIMAGEScreen(char * imageName,int type);
-
+void initSdEjectScreen();
 void mountImageScreen(char * filename);
 void toggleMountOption(int i); 
 
